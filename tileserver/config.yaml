@@ -1,0 +1,34 @@
+# Martin Tile Server Configuration
+# Serves vector tiles from PostGIS tables.
+# Docs: https://martin.maplibre.org/
+
+listen_addresses: "0.0.0.0:3000"
+
+# PostgreSQL connection — reads DATABASE_URL env var automatically,
+# but explicit config is provided here for clarity.
+postgres:
+  connection_string: ${DATABASE_URL}
+  pool_size: 10
+
+# Expose individual tables as vector tile sources
+tables:
+  features:
+    schema: public
+    table: features
+    srid: 4326
+    geometry_column: geometry
+    geometry_type: GEOMETRY
+    properties:
+      - id
+      - source_channel
+      - feature_type
+      - name
+      - commodity_primary
+      - deposit_type
+      - status
+      - source_quality
+    # Tile URL: /features/{z}/{x}/{y}
+
+# Tile caching settings
+cache:
+  size_mb: 512

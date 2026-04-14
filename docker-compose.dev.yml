@@ -1,0 +1,24 @@
+version: "3.9"
+
+# Development overrides — hot reload, debug ports, relaxed healthchecks
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  backend:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app
+    environment:
+      APP_ENV: development
+      PYTHONDONTWRITEBYTECODE: "1"
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # debugpy remote attach port
+
+  worker:
+    command: celery -A celery_worker worker --loglevel=debug --concurrency=2 --pool=solo
+    environment:
+      APP_ENV: development
+
+  frontend:
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    environment:
+      VITE_API_URL: http://localhost:8000
