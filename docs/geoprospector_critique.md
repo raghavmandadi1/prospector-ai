@@ -1,0 +1,23 @@
+Honest take after digging in: the project as scoped won't produce decision-grade output for an actual prospector. The methodology is sound, but the question, the data, and the audience don't line up.
+
+The biggest issue is the premise. OF 01-501 worked in NE WA in 2001 because there was still unprospected federal ground with a clean deposit model. The Cascades are the opposite — every quartz vein within walking distance of a creek was prospected from 1880 to 1942. The remaining undiscovered economic gold is blind: buried under till, vegetation, or hundreds of meters of rock. Finding blind targets requires geophysics and drilling, not GIS overlays. A WoE model trained on Monte Cristo + Blewett + Wenatchee will mostly point you back at Monte Cristo, Blewett, and Wenatchee.
+
+Second issue: the addressable land is tiny. Glacier Peak, Henry M. Jackson, and Alpine Lakes Wilderness areas plus tribal lands cover most of the prospective ground in Snohomish. Wilderness designation prohibits new claims. WA permitting runs 5–10 years. If you draw the legal mask honestly, maybe 5–10 percent of high-scoring cells are actually prospectable.
+
+Third: the data resolution doesn't match the geological question. Stream-sediment surveys are 1970s vintage at roughly 1 sample per 15 km². Aeromag at 400 m line spacing won't resolve vein swarms. WA DGER 1:100k geology has unit boundaries off by hundreds of meters under cover. You'd be rendering 250 m grid cells from data whose effective resolution is kilometers — false confidence baked in.
+
+Other real flaws: WoE assumes conditional independence of predictor themes (almost never true — inflates the favorable tier with false positives); training data has heavy survivorship bias (we have mines where 1900-era prospectors walked; "no mines" doesn't mean "no deposit"); LLM-generated geological narrative sounds professional whether or not it's accurate; "80 percent of training sites in favorable tier" is mostly a memorization test, not validation.
+
+Adding counties (Chelan, Stevens, Whatcom, Okanogan) helps the training set a little but doesn't fix any structural issues. The bigger move is extending into Idaho and the Oregon Cascades — the metallogenic belt doesn't stop at state lines.
+
+What I'd actually recommend if you want this to produce value:
+
+Reframe the product. Instead of "find new gold deposits," reframe as "rank under-explored historical workings for re-examination." Most WA gold mines closed for economic reasons — price collapse, war orders, infrastructure failure — not ore exhaustion. There are thousands of 1880–1920 prospects that stopped at 100–400 ft. Build a system that ingests Bulletin 1359, GM-22, the Washington Geology archive, BLM patents, and historical USGS papers; OCRs them with vision-LLMs; extracts production, depth, closure cause, and last-recorded grade; cross-references against modern land status. Output: a ranked list of 200 historical workings most worth re-examining, with synthesized context per site. This is what LLMs are uniquely good at — unstructured-text mining over a closed corpus — and there are real customers (junior explorers, claim consolidators, individual prospectors).
+
+Pair that with a commodity pivot. Gold in the Cascades is mature. The findable mineral wealth in WA right now is critical minerals — Ni-Co in ophiolites, REE in alkaline intrusives, Li in pegmatites. USGS EarthMRI is actively funding new data collection. Same architecture, same agents, but clearer deposit models, less prospected ground, and federal-strategic interest equals real customers.
+
+Other defensible pivots: a placer-prospecting tool for recreational miners (4,000+ active in WA, real subscription willingness, low regulatory friction); an exploration co-pilot for junior mining companies that ingests their private drill data and parses NI 43-101 reports; or a methodology-demonstration portfolio piece scoped to one district done very well.
+
+If you want to keep building, my recommendation is to combine the historical-workings reframe with the critical-minerals expansion. Keep the multi-agent + WoE framework, swap WoE for a gradient-boosted classifier (better stats, same training data, around two weeks of work), add a hard land-tenure filter at the front rather than the end, and make historical-text mining a first-class capability instead of a side feature. Geographic scope: add Chelan, Stevens, Whatcom, Okanogan, plus Idaho Panhandle and the Oregon Cascades for training-set scale.
+
+Want me to write this up as a v2 system design with milestones and kill criteria, or do a quick feasibility check on the historical-workings pivot first?

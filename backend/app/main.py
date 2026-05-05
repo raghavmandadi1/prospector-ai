@@ -1,19 +1,24 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.session import init_db
-from app.api import channels, features, analysis
 from app.config import settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup, clean up on shutdown."""
-    await init_db()
+    if settings.dev_mode:
+        logger.info("DEV MODE enabled — skipping DB init, Celery, and Redis")
+    else:
+        from app.db.session import init_db
+        await init_db()
     yield
-    # Cleanup (close DB pool, etc.) happens automatically via SQLAlchemy
 
 
 app = FastAPI(
@@ -31,11 +36,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(channels.router, prefix="/api/v1")
-app.include_router(features.router, prefix="/api/v1")
-app.include_router(analysis.router, prefix="/api/v1")
+# Mount the appropriate analysis router based on mode
+if settings.dev_mode:
+    from app.api import analysis_dev
+    app.include_router(analysis_dev.router, prefix="/api/v1")
+    logger.info("Mounted dev-mode analysis routes (in-process, no DB)")
+else:
+    from app.api import channels, features, analysis
+    app.include_router(channels.router, prefix="/api/v1")
+    app.include_router(features.router, prefix="/api/v1")
+    app.include_router(analysis.router, prefix="/api/v1")
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "geoprospector-api"}
+    return {
+        "status": "ok",
+        "service": "geoprospector-api",
+        "dev_mode": settings.dev_mode,
+    }

@@ -75,8 +75,10 @@ def generate_grid(aoi_geojson: Dict[str, Any], resolution_m: float = 1000) -> Li
     minx, miny, maxx, maxy = bounds
     cells = []
 
+    col = 0
     x = minx
     while x < maxx:
+        row = 0
         y = miny
         while y < maxy:
             cell_utm = box(x, y, x + resolution_m, y + resolution_m)
@@ -85,18 +87,21 @@ def generate_grid(aoi_geojson: Dict[str, Any], resolution_m: float = 1000) -> Li
                 clipped = cell_utm.intersection(aoi_utm)
                 if clipped.is_empty:
                     y += resolution_m
+                    row += 1
                     continue
                 # Project back to WGS84
                 cell_wgs84 = transform(project_to_wgs84, clipped)
                 b = cell_wgs84.bounds  # (min_lon, min_lat, max_lon, max_lat)
                 cells.append(
                     GridCell(
-                        cell_id=str(uuid.uuid4()),
+                        cell_id=f"c{col}_r{row}",
                         geometry=mapping(cell_wgs84),
                         bbox=b,
                     )
                 )
             y += resolution_m
+            row += 1
         x += resolution_m
+        col += 1
 
     return cells

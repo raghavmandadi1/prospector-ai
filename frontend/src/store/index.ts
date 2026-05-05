@@ -16,6 +16,10 @@ interface AppState {
   currentJob: AnalysisJob | null
   setCurrentJob: (job: AnalysisJob | null) => void
 
+  // Agent results from last run (for evidence drawer breakdown)
+  lastAgentResults: Record<string, any> | null
+  setLastAgentResults: (results: Record<string, any> | null) => void
+
   // Final scored results from a completed job
   analysisResults: ScoredCell[]
   setAnalysisResults: (cells: ScoredCell[]) => void
@@ -32,9 +36,25 @@ interface AppState {
   agentWeights: Record<string, number>
   setAgentWeights: (weights: Record<string, number>) => void
 
+  // Which agents are enabled for the next run
+  enabledAgents: Record<string, boolean>
+  setEnabledAgents: (enabled: Record<string, boolean>) => void
+
   // Grid resolution in meters
   resolutionM: number
   setResolutionM: (m: number) => void
+
+  // Anthropic API key (in-memory only, never persisted)
+  apiKey: string
+  setApiKey: (key: string) => void
+
+  // Whether the AOI polygon is being drawn
+  isDrawing: boolean
+  setIsDrawing: (drawing: boolean) => void
+
+  // AOI area in km² (computed when polygon is drawn)
+  aoiAreaKm2: number | null
+  setAoiAreaKm2: (area: number | null) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -46,6 +66,9 @@ export const useAppStore = create<AppState>((set) => ({
 
   currentJob: null,
   setCurrentJob: (currentJob) => set({ currentJob }),
+
+  lastAgentResults: null,
+  setLastAgentResults: (lastAgentResults) => set({ lastAgentResults }),
 
   analysisResults: [],
   setAnalysisResults: (analysisResults) => set({ analysisResults }),
@@ -66,6 +89,25 @@ export const useAppStore = create<AppState>((set) => ({
   },
   setAgentWeights: (agentWeights) => set({ agentWeights }),
 
+  enabledAgents: {
+    lithology: true,
+    historical: true,
+    structure: false,
+    geochemistry: false,
+    remote_sensing: false,
+    proximity: false,
+  },
+  setEnabledAgents: (enabledAgents) => set({ enabledAgents }),
+
   resolutionM: 1000,
   setResolutionM: (resolutionM) => set({ resolutionM }),
+
+  apiKey: '',
+  setApiKey: (apiKey) => set({ apiKey }),
+
+  isDrawing: false,
+  setIsDrawing: (isDrawing) => set({ isDrawing }),
+
+  aoiAreaKm2: null,
+  setAoiAreaKm2: (aoiAreaKm2) => set({ aoiAreaKm2 }),
 }))

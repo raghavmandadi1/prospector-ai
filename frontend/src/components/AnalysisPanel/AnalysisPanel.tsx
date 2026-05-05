@@ -1,10 +1,17 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useAppStore } from '../../store'
-import { analysisApi, subscribeToJobEvents } from '../../api/client'
-import type { SSEEvent } from '../../types'
+import { runAnalysisDev } from '../../api/client'
+import type { ScoredCell } from '../../types'
 
 const MINERALS = ['gold', 'silver', 'copper', 'uranium', 'lithium', 'zinc', 'lead']
-const AGENTS = ['lithology', 'structure', 'geochemistry', 'historical', 'remote_sensing', 'proximity']
+const AGENTS: { id: string; label: string; description: string }[] = [
+  { id: 'lithology', label: 'Lithology', description: 'Bedrock geology favorability' },
+  { id: 'historical', label: 'Historical', description: 'Historic mining records & GLO notes' },
+  { id: 'structure', label: 'Structure', description: 'Faults, shear zones, fold axes' },
+  { id: 'geochemistry', label: 'Geochemistry', description: 'Geochemical anomalies' },
+  { id: 'remote_sensing', label: 'Remote Sensing', description: 'Alteration signatures from imagery' },
+  { id: 'proximity', label: 'Proximity', description: 'Distance to known deposits' },
+]
 const RESOLUTIONS = [250, 500, 1000, 2000, 5000]
 
 export default function AnalysisPanel() {
@@ -12,21 +19,43 @@ export default function AnalysisPanel() {
     aoi,
     targetMineral, setTargetMineral,
     agentWeights, setAgentWeights,
+    enabledAgents, setEnabledAgents,
     resolutionM, setResolutionM,
-    setCurrentJob,
     setAnalysisResults,
+    setLastAgentResults,
+    apiKey, setApiKey,
+    isDrawing, setIsDrawing,
+    aoiAreaKm2,
+    setAoi, setAoiAreaKm2,
   } = useAppStore()
 
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
   const [completedAgents, setCompletedAgents] = useState(0)
+  const [showApiKey, setShowApiKey] = useState(false)
 
-  const totalAgents = AGENTS.length
+  const selectedAgentIds = Object.entries(enabledAgents)
+    .filter(([, enabled]) => enabled)
+    .map(([id]) => id)
+
+  const totalAgents = selectedAgentIds.length
+
+  function toggleAgent(agentId: string) {
+    setEnabledAgents({ ...enabledAgents, [agentId]: !enabledAgents[agentId] })
+  }
 
   async function handleRunAnalysis() {
     if (!aoi) {
-      setError('Please draw an area of interest on the map first.')
+      setError('Draw an area of interest on the map first.')
+      return
+    }
+    if (selectedAgentIds.length === 0) {
+      setError('Select at least one agent to run.')
+      return
+    }
+    if (!apiKey.trim()) {
+      setError('Enter your Anthropic API key to run analysis.')
       return
     }
 
@@ -36,24 +65,21 @@ export default function AnalysisPanel() {
     setCompletedAgents(0)
 
     try {
-      const job = await analysisApi.createJob({
-        aoi_geojson: {
-          type: 'FeatureCollection',
-          features: [aoi],
+      await runAnalysisDev(
+        {
+          aoi_geojson: {
+            type: 'FeatureCollection',
+            features: [aoi],
+          },
+          target_mineral: targetMineral,
+          config: {
+            resolution_m: resolutionM,
+            weights: agentWeights,
+            enabled_agents: selectedAgentIds,
+          },
+          anthropic_api_key: apiKey,
         },
-        target_mineral: targetMineral,
-        config: {
-          resolution_m: resolutionM,
-          weights: agentWeights,
-        },
-      })
-
-      setCurrentJob(job)
-
-      // Subscribe to SSE progress events
-      const unsubscribe = subscribeToJobEvents(
-        job.id,
-        (event: SSEEvent) => {
+        (event) => {
           if (event.event === 'agent_started') {
             setProgress((prev) => ({ ...prev, [event.agent_id!]: 'running' }))
           } else if (event.event === 'agent_complete') {
@@ -62,23 +88,24 @@ export default function AnalysisPanel() {
               [event.agent_id!]: event.status === 'completed' ? 'done' : 'failed',
             }))
             setCompletedAgents((n) => n + 1)
+          } else if (event.event === 'results') {
+            // Dev mode: final results come as a special "results" event
+            const scores = event.final_scores as { scored_cells: ScoredCell[] } | undefined
+            const cells = scores?.scored_cells ?? []
+            setAnalysisResults(cells)
+            // Save agent results for evidence drawer breakdown
+            if (event.agent_results) {
+              setLastAgentResults(event.agent_results as Record<string, any>)
+            }
           } else if (event.event === 'job_complete') {
-            // Fetch final results
-            analysisApi.getJob(job.id).then((finalJob) => {
-              setCurrentJob(finalJob)
-              const cells = finalJob.final_scores?.scored_cells ?? []
-              setAnalysisResults(cells)
-              setIsRunning(false)
-              unsubscribe()
-            })
+            setIsRunning(false)
           } else if (event.event === 'error') {
             setError(event.message ?? 'Analysis failed')
             setIsRunning(false)
-            unsubscribe()
           }
         },
-        () => {
-          setError('Lost connection to job stream')
+        (err) => {
+          setError(err.message || 'Lost connection to analysis stream')
           setIsRunning(false)
         }
       )
@@ -93,6 +120,68 @@ export default function AnalysisPanel() {
       <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">
         New Analysis
       </h2>
+
+      {/* API Key input */}
+      <div>
+        <label className="block text-xs text-gray-400 mb-1">Anthropic API Key</label>
+        <div className="relative">
+          <input
+            type={showApiKey ? 'text' : 'password'}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="sk-ant-..."
+            disabled={isRunning}
+            className="w-full bg-gray-700 text-white rounded px-3 py-2 text-sm border border-gray-600 focus:outline-none focus:border-blue-500 pr-16"
+          />
+          <button
+            type="button"
+            onClick={() => setShowApiKey(!showApiKey)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-white"
+          >
+            {showApiKey ? 'Hide' : 'Show'}
+          </button>
+        </div>
+        {apiKey && (
+          <p className="text-xs text-green-400/70 mt-1">Key set (in-memory only)</p>
+        )}
+      </div>
+
+      {/* AOI draw button */}
+      <div>
+        <label className="block text-xs text-gray-400 mb-1">Area of Interest</label>
+        {aoi ? (
+          <div className="flex items-center gap-2">
+            <div className="flex-1 bg-gray-700 rounded px-3 py-2 text-sm border border-green-600/50">
+              <span className="text-green-400">{aoiAreaKm2?.toFixed(1)} km²</span>
+              <span className="text-gray-400 ml-1">polygon defined</span>
+            </div>
+            <button
+              onClick={() => {
+                setAoi(null)
+                setAoiAreaKm2(null)
+                setIsDrawing(true)
+              }}
+              disabled={isRunning}
+              className="px-3 py-2 text-xs rounded bg-gray-700 border border-gray-600 hover:bg-gray-600 text-gray-300"
+            >
+              Redraw
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setIsDrawing(true)}
+            disabled={isRunning}
+            className={`w-full py-2 px-4 rounded text-sm font-medium transition-colors ${
+              isDrawing
+                ? 'bg-yellow-600/30 border border-yellow-500 text-yellow-300'
+                : 'bg-gray-700 border border-gray-600 hover:bg-gray-600 text-gray-300'
+            }`}
+          >
+            {isDrawing ? 'Drawing... click map to place vertices' : 'Draw polygon on map'}
+          </button>
+        )}
+        <p className="text-xs text-gray-500 mt-1">Min 25 km². Double-click to close polygon.</p>
+      </div>
 
       {/* Mineral selector */}
       <div>
@@ -126,43 +215,54 @@ export default function AnalysisPanel() {
         </select>
       </div>
 
-      {/* Agent weight sliders */}
+      {/* Agent selection — checkboxes + weight sliders */}
       <div>
-        <label className="block text-xs text-gray-400 mb-2">Agent Weights</label>
+        <label className="block text-xs text-gray-400 mb-2">Agents to Run</label>
         <div className="space-y-2">
-          {AGENTS.map((agent) => (
-            <div key={agent} className="flex items-center gap-2">
-              <span className="text-xs text-gray-400 w-28 flex-shrink-0 capitalize">
-                {agent.replace('_', ' ')}
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={agentWeights[agent] ?? 0.5}
-                disabled={isRunning}
-                onChange={(e) =>
-                  setAgentWeights({ ...agentWeights, [agent]: Number(e.target.value) })
-                }
-                className="flex-1 accent-blue-500"
-              />
-              <span className="text-xs text-gray-400 w-8 text-right">
-                {(agentWeights[agent] ?? 0.5).toFixed(2)}
-              </span>
-            </div>
-          ))}
+          {AGENTS.map((agent) => {
+            const enabled = enabledAgents[agent.id] ?? false
+            return (
+              <div key={agent.id} className={`rounded border px-3 py-2 transition-colors ${
+                enabled ? 'border-blue-500/50 bg-gray-700/50' : 'border-gray-700 bg-gray-800/50 opacity-60'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={() => toggleAgent(agent.id)}
+                    disabled={isRunning}
+                    className="accent-blue-500 w-3.5 h-3.5"
+                  />
+                  <span className="text-sm text-white flex-1">{agent.label}</span>
+                  {enabled && (
+                    <span className="text-xs text-gray-400">
+                      {(agentWeights[agent.id] ?? 0.5).toFixed(2)}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 ml-6 mt-0.5">{agent.description}</p>
+                {enabled && (
+                  <div className="flex items-center gap-2 mt-1.5 ml-6">
+                    <span className="text-xs text-gray-500 w-10">Weight</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={agentWeights[agent.id] ?? 0.5}
+                      disabled={isRunning}
+                      onChange={(e) =>
+                        setAgentWeights({ ...agentWeights, [agent.id]: Number(e.target.value) })
+                      }
+                      className="flex-1 accent-blue-500 h-1"
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
-
-      {/* AOI hint */}
-      {!aoi && (
-        <p className="text-xs text-yellow-400 bg-yellow-900/30 rounded p-2">
-          Draw an area of interest on the map to enable analysis.
-          <br />
-          <span className="text-gray-400">(AOI draw tool coming soon)</span>
-        </p>
-      )}
 
       {/* Error message */}
       {error && (
@@ -179,14 +279,15 @@ export default function AnalysisPanel() {
           <div className="w-full bg-gray-700 rounded-full h-2">
             <div
               className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${(completedAgents / totalAgents) * 100}%` }}
+              style={{ width: `${totalAgents > 0 ? (completedAgents / totalAgents) * 100 : 0}%` }}
             />
           </div>
           <div className="mt-2 space-y-1">
-            {AGENTS.map((agent) => {
-              const state = progress[agent]
+            {selectedAgentIds.map((agentId) => {
+              const state = progress[agentId]
+              const agent = AGENTS.find((a) => a.id === agentId)
               return (
-                <div key={agent} className="flex items-center gap-2 text-xs">
+                <div key={agentId} className="flex items-center gap-2 text-xs">
                   <span
                     className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       state === 'done'
@@ -198,8 +299,8 @@ export default function AnalysisPanel() {
                         : 'bg-gray-600'
                     }`}
                   />
-                  <span className="text-gray-400 capitalize">
-                    {agent.replace('_', ' ')}
+                  <span className="text-gray-400">
+                    {agent?.label ?? agentId}
                   </span>
                 </div>
               )
@@ -211,10 +312,13 @@ export default function AnalysisPanel() {
       {/* Run button */}
       <button
         onClick={handleRunAnalysis}
-        disabled={isRunning || !aoi}
-        className="w-full py-2 px-4 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+        disabled={isRunning || !aoi || selectedAgentIds.length === 0 || !apiKey.trim()}
+        className="w-full py-2.5 px-4 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-sm font-medium transition-colors"
       >
-        {isRunning ? 'Running Analysis...' : 'Run Analysis'}
+        {isRunning
+          ? 'Running Analysis...'
+          : `Run Analysis (${selectedAgentIds.length} agent${selectedAgentIds.length !== 1 ? 's' : ''})`
+        }
       </button>
     </div>
   )

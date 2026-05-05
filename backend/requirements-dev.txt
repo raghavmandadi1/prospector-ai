@@ -1,0 +1,13 @@
+# Minimal deps for DEV_MODE=true (no PostGIS, no Celery)
+fastapi>=0.111.0
+pydantic-settings>=2.0
+pydantic>=2.0
+uvicorn[standard]
+anthropic
+shapely
+pyproj
+httpx
+python-dotenv
+geojson
+sqlalchemy>=2.0
+

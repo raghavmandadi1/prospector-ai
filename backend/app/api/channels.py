@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,22 +19,22 @@ router = APIRouter(prefix="/channels", tags=["channels"])
 class ChannelCreate(BaseModel):
     name: str
     source_type: str
-    endpoint: str | None = None
-    auth_config: dict | None = None
-    refresh_schedule: str | None = None
-    spatial_coverage: dict | None = None
-    data_type: str | None = None
-    normalization_profile: str | None = None
+    endpoint: Optional[str] = None
+    auth_config: Optional[dict] = None
+    refresh_schedule: Optional[str] = None
+    spatial_coverage: Optional[dict] = None
+    data_type: Optional[str] = None
+    normalization_profile: Optional[str] = None
 
 
 class ChannelOut(BaseModel):
     id: UUID
     name: str
     source_type: str
-    endpoint: str | None
-    data_type: str | None
+    endpoint: Optional[str]
+    data_type: Optional[str]
     is_active: bool
-    last_synced_at: str | None
+    last_synced_at: Optional[str]
 
     class Config:
         from_attributes = True

@@ -15,6 +15,16 @@ AI agents in parallel to score a user-drawn area of interest (AOI) on an interac
 The core output is a **scored, color-coded grid** with per-cell evidence drilldown — not a
 generic heatmap. Every score is backed by traceable evidence from named data sources.
 
+## Scope
+
+- **Geographic scope:** Washington State only — not a generic global tool. Knowledge bases,
+  formation references, and named districts (Republic, Blewett, Monte Cristo, Buckhorn, etc.)
+  are WA-specific.
+- **Primary mineral:** Gold. The scoring engine (`weights.py`) supports five minerals
+  (gold, silver, copper, uranium, lithium), but the agent knowledge base currently only
+  covers gold. Other minerals fall back to the engine without specialist domain knowledge
+  until per-mineral knowledge files are written.
+
 ---
 
 ## Tech Stack
@@ -62,18 +72,29 @@ prospector-ai/
 │   │   ├── review.md                ← /review
 │   │   ├── new-agent.md             ← /new-agent
 │   │   └── new-connector.md         ← /new-connector
+│   ├── skills/                      ← WA-specific geological reference skills
+│   │   ├── wa-tertiary-stratigraphy.md      ← Weaver (1916) Tertiary units, W-of-Cascades
+│   │   ├── wa-eocene-coal-fields.md         ← Newcastle/Renton/Green River/Centralia coal measures
+│   │   ├── wa-pretertiary-basement.md       ← Old Metamorphic Series, Index granodiorite, Hoh fm
+│   │   ├── wa-historical-geology-source.md  ← citation/nomenclature rules for Weaver (1916)
+│   │   └── skill_creator.md
 │   └── mistakes-log.md              ← running log of bugs & lessons learned
 ├── backend/
 │   └── app/
 │       ├── agents/                  ← specialist agents + orchestrator
-│       │   ├── base_agent.py        ← abstract base: build_prompt(), call_llm(), parse_llm_response()
+│       │   ├── base_agent.py        ← abstract base: build_prompt(), call_llm(), parse_llm_response(), load_knowledge()
 │       │   ├── orchestrator.py      ← fans out agents, collects AgentResult, calls scoring engine
 │       │   ├── lithology_agent.py
 │       │   ├── structure_agent.py
 │       │   ├── proximity_agent.py
 │       │   ├── geochemistry_agent.py
 │       │   ├── remote_sensing_agent.py
-│       │   └── historical_agent.py
+│       │   ├── historical_agent.py
+│       │   └── knowledge/           ← per-domain, per-mineral domain knowledge (markdown)
+│       │       ├── lithology/
+│       │       │   └── gold.md      ← WA-specific gold favorability by lithology (epithermal/orogenic/skarn)
+│       │       └── historical/
+│       │           └── gold.md      ← WA gold districts, production, claims/GLO interpretation
 │       ├── connectors/              ← data source integrations
 │       │   ├── base_connector.py    ← abstract base: fetch(bbox), normalize(raw)
 │       │   ├── usgs_mrds.py         ← USGS Mineral Resources Data System (~300k+ deposits)
@@ -117,9 +138,10 @@ prospector-ai/
 ├── docker-compose.yml
 ├── docker-compose.dev.yml
 └── docs/
-    ├── 01_system_design.md          ← authoritative architecture reference
+    ├── 01_system_design.md                ← authoritative architecture reference
     ├── 02_scaffold_prompt.md
-    └── 03_implementation_plan.md
+    ├── 03_implementation_plan.md
+    └── 04_usgs_of00_495_dataset.md        ← NE WA geology W-of-E raster integration plan (designed, not yet implemented)
 ```
 
 ---
@@ -146,6 +168,42 @@ Use `/new-agent` command to scaffold the boilerplate.
 6. Add a `Channel` seed record
 
 Use `/new-connector` command to scaffold the boilerplate.
+
+### Domain Knowledge Bases for Agents
+
+Each specialist agent injects a Washington-specific, mineral-specific knowledge file as its
+system prompt. This is how we ground the LLM in actual WA formations, districts, and
+deposit models rather than generic global heuristics.
+
+- Files live at `backend/app/agents/knowledge/<domain>/<mineral>.md`
+  - `<domain>` is the agent name (`lithology`, `historical`, `structure`, etc.)
+  - `<mineral>` is the lowercase target (`gold`, `silver`, `copper`, `uranium`, `lithium`)
+- `BaseAgent.load_knowledge(domain, target_mineral)` loads the file for that combination,
+  falling back to `<domain>/default.md` if the mineral-specific file does not exist,
+  and returning `None` if neither is present.
+- The loaded markdown is injected as the **system prompt** in the Anthropic API call, so
+  the agent reasons with it baked into its persona — not as user-message context.
+
+**Currently written (gold-only):**
+- `lithology/gold.md` — WofE contrasts (USGS OF01-501), epithermal vs orogenic vs skarn
+  scoring, NE WA grabens (Republic, Toroda Creek, Keller, First Thought), North Cascades
+  metamorphic core
+- `historical/gold.md` — district closure analysis (Republic, Monte Cristo, Blewett,
+  Liberty/Swauk, Colville-Metaline), MRDS positional accuracy caveats, BLM/GLO claims
+  interpretation, depth and technology modifiers
+
+**Pattern when adding a new knowledge file:** keep it WA-specific (cite real formations,
+named districts, and named data sources), include a scoring rubric the LLM can apply
+directly, and document confidence-calibration guidance and common pitfalls.
+
+### Reference Skills (`.claude/skills/`)
+
+Four Washington-geology reference skills, separate from agent knowledge files, encode
+how to cite and interpret historical WA geological literature — primarily Weaver (1916,
+WGS Bulletin 13). Agents producing evidence strings should reference these via the
+Skill tool when their reasoning touches western WA Tertiary stratigraphy, Eocene coal
+fields, or pre-Tertiary basement units. The `wa-historical-geology-source` skill defines
+the canonical citation form (`Weaver_1916_WGS_Bulletin_13`) for `data_sources_used`.
 
 ### AgentResult / ScoredCell Schema
 
@@ -178,14 +236,18 @@ AgentResult(
 
 ### Mineral Weight Presets (default)
 
-| Agent | Gold | Silver | Copper | Lithium |
-|---|---|---|---|---|
-| Lithology | 0.20 | 0.20 | 0.25 | 0.15 |
-| Structure | 0.25 | 0.20 | 0.15 | 0.10 |
-| Proximity | 0.20 | 0.20 | 0.20 | 0.20 |
-| Geochemistry | 0.20 | 0.20 | 0.20 | 0.25 |
-| Remote Sensing | 0.10 | 0.10 | 0.10 | 0.15 |
-| Historical | 0.15 | 0.15 | 0.10 | 0.05 |
+Authoritative source: `backend/app/scoring/weights.py`. Weights are relative; the scoring
+engine normalizes during weighted-mean computation. Minerals not listed fall back to
+`EQUAL_WEIGHTS` (1.0 across all six agents).
+
+| Agent | Gold | Silver | Copper | Uranium | Lithium |
+|---|---|---|---|---|---|
+| Lithology | 0.25 | 0.25 | 0.30 | 0.35 | 0.35 |
+| Structure | 0.30 | 0.25 | 0.20 | 0.20 | 0.15 |
+| Geochemistry | 0.20 | 0.20 | 0.25 | 0.25 | 0.25 |
+| Historical | 0.15 | 0.15 | 0.03 | 0.10 | 0.03 |
+| Remote Sensing | 0.07 | 0.05 | 0.15 | 0.03 | 0.07 |
+| Proximity | 0.03 | 0.10 | 0.07 | 0.07 | 0.15 |
 
 ---
 
@@ -244,21 +306,46 @@ open http://localhost:5173
 
 ---
 
-## Environment Variables (required)
+## Environment Variables
+
+All config is loaded via Pydantic `BaseSettings` in `backend/app/config.py` from a `.env`
+file. Variable names are case-insensitive. There are no raw `os.getenv()` calls in the
+codebase — add new settings to `config.py` rather than reading env directly.
 
 ```env
-DATABASE_URL=postgresql+asyncpg://...
+# App
+APP_ENV=development
+DEV_MODE=true                  # when true, analysis runs in-process (no Celery/Redis required)
+SECRET_KEY=change-this-secret-key
+CORS_ORIGINS=["http://localhost:5173"]
+
+# Database / Redis
+DATABASE_URL=postgresql+asyncpg://geoprospector:changeme@localhost:5432/geoprospector
 REDIS_URL=redis://localhost:6379/0
-S3_ENDPOINT=http://localhost:9000
-S3_BUCKET=geoprospector-raw
-S3_ACCESS_KEY=...
-S3_SECRET_KEY=...
-ANTHROPIC_API_KEY=...
-MINDAT_API_KEY=...          # optional
-NASA_EARTHDATA_TOKEN=...    # optional, for remote sensing
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/1
+
+# MinIO (S3-compatible object store)
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=geoprospector
+
+# LLM
+ANTHROPIC_API_KEY=...          # required
+
+# Connector API keys
+MINDAT_API_KEY=...             # required for the mindat connector; optional otherwise
 ```
 
 Copy `.env.example` → `.env` and fill in secrets before starting.
+
+### `DEV_MODE` behavior
+
+When `DEV_MODE=true`, the analysis pipeline runs **in-process** instead of dispatching
+through Celery — useful for local debugging without booting Redis or the celery_worker
+container. Always test with `DEV_MODE=false` before assuming a change works in
+production-like conditions; the code paths are not identical.
 
 ---
 
@@ -277,6 +364,23 @@ Definitions live in `.claude/commands/`.
 
 ---
 
+## Static Reference Datasets
+
+In addition to the live API connectors above, a one-time-loaded reference dataset
+is in design but **not yet implemented**:
+
+- **USGS Open-File Report 00-495** (Boleneus & Causey 2000) — *Geologic raster data
+  for weights-of-evidence analysis in NE Washington.* Covers the six 1:100,000
+  quadrangles (Colville, Chewelah, Republic, Nespelem, Omak, Oroville) — i.e. the
+  heart of WA gold country. Four ArcInfo GRID layers: `newageol` (lithology, 50 m),
+  `newafold` (folds, 50 m), `newafaul` (faults, 100 m), `newadike` (dikes, 200 m).
+  Native CRS is UTM 11N / NAD27 (EPSG:26711) — must be reprojected to EPSG:4326.
+  Full integration plan, conversion path, and proposed knowledge-JSON structure
+  are in `docs/04_usgs_of00_495_dataset.md`. When implemented, the loader lives at
+  `backend/app/connectors/usgs_of00_495.py` (one-time load, not a recurring sync).
+
+---
+
 ## Current Implementation Status
 
 Track progress in `docs/03_implementation_plan.md`. Update the status line below
@@ -292,4 +396,7 @@ as milestones complete:
 
 ---
 
-*Last updated: project setup. Update this file when major architecture decisions change.*
+*Last updated: 2026-05-04 — added WA scope, gold-first priority, knowledge-base architecture
+(`agents/knowledge/<domain>/<mineral>.md`), `.claude/skills/` reference, USGS OF00-495 dataset
+plan, corrected mineral weight presets and env-var schema, documented `DEV_MODE` in-process
+mode. Update this file when major architecture decisions change.*

@@ -5,16 +5,12 @@ OrchestratorAgent coordinates the full analysis pipeline:
 3. Fans out to all specialist agents in parallel
 4. Passes results to the ScoringEngine
 5. Persists final scores to the AnalysisJob record
-6. Emits SSE progress events via Redis pub/sub
+6. Emits SSE progress events via Redis pub/sub (or in-process callback in dev mode)
 """
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, List
-from uuid import UUID
-
-import redis.asyncio as aioredis
+from typing import Any, Callable, Dict, List, Optional
 
 from app.agents.base_agent import BaseAgent
 from app.agents.lithology_agent import LithologyAgent
@@ -31,17 +27,32 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Registry of agent_id → class (used to instantiate only enabled agents)
+AGENT_CLASSES = {
+    "lithology": LithologyAgent,
+    "structure": StructureAgent,
+    "proximity": ProximityAgent,
+    "geochemistry": GeochemistryAgent,
+    "remote_sensing": RemoteSensingAgent,
+    "historical": HistoricalAgent,
+}
+
 
 class OrchestratorAgent:
-    def __init__(self):
-        self.agents: List[BaseAgent] = [
-            LithologyAgent(),
-            StructureAgent(),
-            ProximityAgent(),
-            GeochemistryAgent(),
-            RemoteSensingAgent(),
-            HistoricalAgent(),
-        ]
+    def __init__(self, api_key: Optional[str] = None):
+        self._api_key = api_key
+
+    def _build_agents(self, enabled_agents: Optional[List[str]] = None) -> List[BaseAgent]:
+        """Instantiate only the requested agents, passing through the API key."""
+        ids = enabled_agents or list(AGENT_CLASSES.keys())
+        agents = []
+        for aid in ids:
+            cls = AGENT_CLASSES.get(aid)
+            if cls:
+                agents.append(cls(api_key=self._api_key))
+            else:
+                logger.warning(f"Unknown agent id: {aid}")
+        return agents
 
     async def run_analysis(
         self,
@@ -49,16 +60,25 @@ class OrchestratorAgent:
         aoi_geojson: Dict[str, Any],
         target_mineral: str,
         config: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        emit_fn: Optional[Callable] = None,
+    ) -> tuple:
         """
-        Full analysis pipeline. Called by the Celery worker.
+        Full analysis pipeline.
 
-        Returns the final_scores dict to be persisted to the DB.
+        Args:
+            job_id: Unique job identifier
+            aoi_geojson: GeoJSON FeatureCollection with AOI polygon
+            target_mineral: Target mineral to prospect for
+            config: Analysis config (resolution_m, weights, enabled_agents)
+            emit_fn: Optional async callback for SSE events.
+                      If None, uses Redis pub/sub.
         """
-        red = aioredis.from_url(settings.redis_url)
+        # Choose emit strategy
+        if emit_fn is None:
+            emit_fn = await self._make_redis_emitter(job_id)
 
         try:
-            await self._emit(red, job_id, {"event": "started", "job_id": job_id})
+            await emit_fn({"event": "started", "job_id": job_id})
 
             # 1. Generate grid cells for the AOI
             resolution_m = config.get("resolution_m", 1000)
@@ -68,15 +88,15 @@ class OrchestratorAgent:
             # 2. Build spatial context for each agent domain (PostGIS queries)
             spatial_context = await self._build_spatial_context(aoi_geojson, grid_cells)
 
-            # 3. Fan out to all enabled agents in parallel
-            enabled_agents = config.get("enabled_agents", None)  # None = all
-            agent_tasks = []
-            for agent in self.agents:
-                if enabled_agents and agent.agent_id not in enabled_agents:
-                    continue
-                agent_tasks.append(
-                    self._run_agent_with_progress(red, job_id, agent, aoi_geojson, target_mineral, spatial_context, config)
-                )
+            # 3. Fan out to enabled agents in parallel
+            enabled_agents = config.get("enabled_agents", None)
+            agents = self._build_agents(enabled_agents)
+            logger.info(f"[{job_id}] Running {len(agents)} agents: {[a.agent_id for a in agents]}")
+
+            agent_tasks = [
+                self._run_agent_with_progress(emit_fn, agent, aoi_geojson, target_mineral, spatial_context, config)
+                for agent in agents
+            ]
 
             agent_results: List[AgentResult] = await asyncio.gather(*agent_tasks)
             logger.info(f"[{job_id}] All agents completed")
@@ -94,21 +114,29 @@ class OrchestratorAgent:
 
             agent_results_dict = {r.agent_id: r.model_dump() for r in agent_results}
 
-            await self._emit(red, job_id, {"event": "job_complete", "job_id": job_id, "status": "completed"})
+            await emit_fn({"event": "job_complete", "job_id": job_id, "status": "completed"})
 
             return final_scores, agent_results_dict
 
         except Exception as exc:
             logger.exception(f"[{job_id}] Orchestrator failed: {exc}")
-            await self._emit(red, job_id, {"event": "error", "message": str(exc)})
+            await emit_fn({"event": "error", "message": str(exc)})
             raise
-        finally:
-            await red.aclose()
+
+    async def _make_redis_emitter(self, job_id: str) -> Callable:
+        """Create an emit function backed by Redis pub/sub."""
+        import redis.asyncio as aioredis
+        red = aioredis.from_url(settings.redis_url)
+        channel = f"job:{job_id}:events"
+
+        async def emit(payload: Dict):
+            await red.publish(channel, json.dumps(payload))
+
+        return emit
 
     async def _run_agent_with_progress(
         self,
-        red: aioredis.Redis,
-        job_id: str,
+        emit_fn: Callable,
         agent: BaseAgent,
         aoi_geojson: Dict,
         target_mineral: str,
@@ -116,10 +144,9 @@ class OrchestratorAgent:
         config: Dict,
     ) -> AgentResult:
         """Wrapper that emits SSE events before and after each agent run."""
-        await self._emit(red, job_id, {"event": "agent_started", "agent_id": agent.agent_id})
+        await emit_fn({"event": "agent_started", "agent_id": agent.agent_id})
         result = await agent.run(aoi_geojson, target_mineral, spatial_context, config)
-        await self._emit(
-            red, job_id,
+        await emit_fn(
             {"event": "agent_complete", "agent_id": agent.agent_id, "status": result.status}
         )
         return result
@@ -132,30 +159,16 @@ class OrchestratorAgent:
         """
         Query PostGIS for features relevant to each agent domain.
 
-        TODO: Implement actual spatial queries per domain:
-        - lithology_agent: query geology units intersecting AOI
-        - structure_agent: query fault traces within buffer
-        - proximity_agent: query known mines/deposits within AOI
-        - geochemistry_agent: query geochemical samples within AOI
-        - remote_sensing_agent: fetch raster tile references
-        - historical_agent: query historic mining records
-
+        TODO: Implement actual spatial queries per domain.
         For now, returns a stub with grid cells so agents can produce
-        placeholder scores during development.
+        scores during development.
         """
         return {
             "grid_cells": [cell.model_dump() if hasattr(cell, "model_dump") else cell.__dict__ for cell in grid_cells],
             "aoi_geojson": aoi_geojson,
-            # Domain-specific context — to be populated:
             "geology_units": [],
             "fault_traces": [],
             "known_deposits": [],
             "geochemical_samples": [],
             "historic_mines": [],
         }
-
-    @staticmethod
-    async def _emit(red: aioredis.Redis, job_id: str, payload: Dict):
-        """Publish a progress event to the Redis pub/sub channel for this job."""
-        channel = f"job:{job_id}:events"
-        await red.publish(channel, json.dumps(payload))

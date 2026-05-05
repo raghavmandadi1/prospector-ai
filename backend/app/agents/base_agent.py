@@ -17,6 +17,7 @@ To add a new agent:
 import json
 import logging
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import anthropic
@@ -26,13 +27,17 @@ from app.models.agent_result import AgentResult, ScoredCell
 
 logger = logging.getLogger(__name__)
 
+# Root directory for agent knowledge base files
+KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
+
 
 class BaseAgent(ABC):
     agent_id: str = "base"
     agent_name: str = "Base Agent"
 
-    def __init__(self):
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    def __init__(self, api_key: Optional[str] = None):
+        key = api_key or settings.anthropic_api_key
+        self._client = anthropic.AsyncAnthropic(api_key=key)
 
     async def run(
         self,
@@ -85,16 +90,48 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
-    async def call_llm(self, prompt: str) -> str:
+    def load_knowledge(self, domain: str, target_mineral: str) -> Optional[str]:
+        """
+        Load a domain knowledge markdown file for the given mineral.
+
+        Looks for: knowledge/<domain>/<mineral>.md
+        Falls back to: knowledge/<domain>/default.md
+        Returns None if no knowledge file exists.
+        """
+        mineral_key = target_mineral.lower().replace(" ", "_")
+        knowledge_file = KNOWLEDGE_DIR / domain / f"{mineral_key}.md"
+        if not knowledge_file.exists():
+            knowledge_file = KNOWLEDGE_DIR / domain / "default.md"
+        if not knowledge_file.exists():
+            logger.info(
+                f"[{self.agent_id}] No knowledge file for {domain}/{mineral_key}"
+            )
+            return None
+        content = knowledge_file.read_text(encoding="utf-8")
+        logger.info(
+            f"[{self.agent_id}] Loaded knowledge: {knowledge_file.name} "
+            f"({len(content)} chars)"
+        )
+        return content
+
+    async def call_llm(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> str:
         """
         Call the Anthropic API with the constructed prompt.
         Uses claude-sonnet-4-6 by default; override in subclass for lighter tasks.
+
+        If system_prompt is provided, it is sent as the system message,
+        which is the recommended place for domain knowledge context.
         """
-        message = await self._client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        kwargs = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        message = await self._client.messages.create(**kwargs)
         return message.content[0].text
 
     @abstractmethod

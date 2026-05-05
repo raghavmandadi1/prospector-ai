@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 class AnalysisJobCreate(BaseModel):
     aoi_geojson: dict  # GeoJSON Feature or FeatureCollection
     target_mineral: str
-    config: dict | None = None  # Optional: resolution_m, weights, enabled_agents
+    config: Optional[dict] = None  # Optional: resolution_m, weights, enabled_agents
 
 
 class AnalysisJobOut(BaseModel):
@@ -29,12 +30,12 @@ class AnalysisJobOut(BaseModel):
     status: str
     target_mineral: str
     aoi_geojson: dict
-    config: dict | None
-    agent_results: dict | None
-    final_scores: dict | None
+    config: Optional[dict]
+    agent_results: Optional[dict]
+    final_scores: Optional[dict]
     created_at: str
-    completed_at: str | None
-    error_message: str | None
+    completed_at: Optional[str]
+    error_message: Optional[str]
 
     class Config:
         from_attributes = True

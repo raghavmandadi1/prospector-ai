@@ -4,6 +4,7 @@ from typing import List
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    dev_mode: bool = True  # When True, run analysis in-process (no Celery/Redis/PostGIS)
     secret_key: str = "change-this-secret-key"
 
     # Database

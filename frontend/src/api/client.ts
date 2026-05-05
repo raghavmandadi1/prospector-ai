@@ -88,6 +88,7 @@ export const analysisApi = {
       weights?: Record<string, number>
       enabled_agents?: string[]
     }
+    anthropic_api_key?: string
   }) =>
     request<AnalysisJob>('/api/v1/analysis/jobs', {
       method: 'POST',
@@ -99,22 +100,79 @@ export const analysisApi = {
 }
 
 // ---------------------------------------------------------------------------
-// SSE hook for job progress
+// Dev-mode: stream analysis via POST response
+// ---------------------------------------------------------------------------
+
+/**
+ * Run analysis in dev mode. The POST response itself is an SSE stream.
+ * No separate job ID or EventSource subscription needed.
+ */
+export async function runAnalysisDev(
+  body: {
+    aoi_geojson: GeoJSON.FeatureCollection
+    target_mineral: string
+    config?: {
+      resolution_m?: number
+      weights?: Record<string, number>
+      enabled_agents?: string[]
+    }
+    anthropic_api_key: string
+  },
+  onEvent: (event: SSEEvent & { final_scores?: unknown; agent_results?: unknown }) => void,
+  onError?: (err: Error) => void
+): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/v1/analysis/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`API error ${res.status}: ${text}`)
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // Parse SSE lines from buffer
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? '' // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('data: ')) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6))
+            onEvent(parsed)
+          } catch {
+            // Ignore malformed JSON
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (onError) onError(err instanceof Error ? err : new Error(String(err)))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SSE hook for job progress (production mode)
 // ---------------------------------------------------------------------------
 
 /**
  * Subscribe to real-time agent progress events for a job.
- *
- * @param jobId - The analysis job ID
- * @param onEvent - Callback fired for each SSE message
- * @returns A cleanup function that closes the EventSource
- *
- * Usage:
- *   const unsubscribe = subscribeToJobEvents(jobId, (event) => {
- *     console.log(event.event, event.agent_id)
- *   })
- *   // later:
- *   unsubscribe()
+ * Used in production mode (Celery + Redis).
  */
 export function subscribeToJobEvents(
   jobId: string,

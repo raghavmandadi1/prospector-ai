@@ -1,9 +1,36 @@
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 import maplibregl from 'maplibre-gl'
+import MapboxDraw from '@mapbox/mapbox-gl-draw'
+import area from '@turf/area'
 import { useAppStore } from '../../store'
 import type { ScoredCell } from '../../types'
 
-const TILESERVER_URL = import.meta.env.VITE_TILESERVER_URL ?? 'http://localhost:3000'
+// mapbox-gl-draw CSS (inline the essential styles so we don't need a separate import)
+import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
+
+const TILESERVER_URL = import.meta.env.VITE_TILESERVER_URL as string | undefined
+
+// Minimum AOI area in square meters (~25 km²)
+const MIN_AOI_AREA_M2 = 25_000_000
+
+// Inline OSM raster basemap — no API key, no tileserver required.
+const OSM_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: [
+        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      ],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors',
+      maxzoom: 19,
+    },
+  },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+}
 
 // Tier color scale
 const TIER_COLORS: Record<string, string> = {
@@ -16,7 +43,61 @@ const TIER_COLORS: Record<string, string> = {
 export default function MapView() {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
-  const { analysisResults, setSelectedCell, aoi } = useAppStore()
+  const drawRef = useRef<MapboxDraw | null>(null)
+  const {
+    analysisResults, setSelectedCell,
+    aoi, setAoi,
+    isDrawing, setIsDrawing,
+    setAoiAreaKm2,
+  } = useAppStore()
+
+  const handleDrawCreate = useCallback((e: { features: GeoJSON.Feature[] }) => {
+    const feature = e.features[0]
+    if (!feature) return
+
+    const areaM2 = area(feature as GeoJSON.Feature)
+    const areaKm2 = areaM2 / 1_000_000
+
+    if (areaM2 < MIN_AOI_AREA_M2) {
+      // Too small — remove the polygon and warn
+      if (drawRef.current) {
+        drawRef.current.deleteAll()
+      }
+      setAoi(null)
+      setAoiAreaKm2(null)
+      alert(
+        `Area too small: ${areaKm2.toFixed(1)} km².\n` +
+        `Minimum area is 25 km² for meaningful analysis.`
+      )
+      return
+    }
+
+    setAoi(feature)
+    setAoiAreaKm2(areaKm2)
+    setIsDrawing(false)
+  }, [setAoi, setAoiAreaKm2, setIsDrawing])
+
+  const handleDrawUpdate = useCallback((e: { features: GeoJSON.Feature[] }) => {
+    const feature = e.features[0]
+    if (!feature) return
+
+    const areaM2 = area(feature as GeoJSON.Feature)
+    const areaKm2 = areaM2 / 1_000_000
+
+    if (areaM2 < MIN_AOI_AREA_M2) {
+      setAoi(null)
+      setAoiAreaKm2(null)
+      return
+    }
+
+    setAoi(feature)
+    setAoiAreaKm2(areaKm2)
+  }, [setAoi, setAoiAreaKm2])
+
+  const handleDrawDelete = useCallback(() => {
+    setAoi(null)
+    setAoiAreaKm2(null)
+  }, [setAoi, setAoiAreaKm2])
 
   // Initialize map
   useEffect(() => {
@@ -24,36 +105,56 @@ export default function MapView() {
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
-      style: 'https://demotiles.maplibre.org/style.json',
-      center: [-105, 40],  // Default center: western US
-      zoom: 6,
+      style: OSM_STYLE,
+      center: [-120.5, 47.5],  // Center on Washington State
+      zoom: 7,
     })
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
     map.addControl(new maplibregl.ScaleControl(), 'bottom-right')
 
-    map.on('load', () => {
-      // --- Features layer from Martin tileserver ---
-      map.addSource('features-tiles', {
-        type: 'vector',
-        tiles: [`${TILESERVER_URL}/features/{z}/{x}/{y}`],
-        minzoom: 6,
-        maxzoom: 14,
-      })
+    // Initialize draw control
+    const draw = new MapboxDraw({
+      displayControlsDefault: false,
+      controls: {
+        polygon: true,
+        trash: true,
+      },
+      defaultMode: 'simple_select',
+    })
 
-      map.addLayer({
-        id: 'features-points',
-        type: 'circle',
-        source: 'features-tiles',
-        'source-layer': 'features',
-        paint: {
-          'circle-radius': 5,
-          'circle-color': '#60a5fa',  // blue-400
-          'circle-opacity': 0.8,
-          'circle-stroke-color': '#1e40af',
-          'circle-stroke-width': 1,
-        },
-      })
+    // MapboxDraw works with MapLibre via the mapbox-gl compatibility
+    map.addControl(draw as unknown as maplibregl.IControl, 'top-left')
+    drawRef.current = draw
+
+    map.on('draw.create', handleDrawCreate)
+    map.on('draw.update', handleDrawUpdate)
+    map.on('draw.delete', handleDrawDelete)
+
+    map.on('load', () => {
+      // --- Features layer from Martin tileserver (only if configured) ---
+      if (TILESERVER_URL) {
+        map.addSource('features-tiles', {
+          type: 'vector',
+          tiles: [`${TILESERVER_URL}/features/{z}/{x}/{y}`],
+          minzoom: 6,
+          maxzoom: 14,
+        })
+
+        map.addLayer({
+          id: 'features-points',
+          type: 'circle',
+          source: 'features-tiles',
+          'source-layer': 'features',
+          paint: {
+            'circle-radius': 5,
+            'circle-color': '#60a5fa',
+            'circle-opacity': 0.8,
+            'circle-stroke-color': '#1e40af',
+            'circle-stroke-width': 1,
+          },
+        })
+      }
 
       // --- Results grid layer (filled on analysis complete) ---
       map.addSource('results-grid', {
@@ -110,26 +211,6 @@ export default function MapView() {
       map.on('mouseleave', 'results-cells', () => {
         map.getCanvas().style.cursor = ''
       })
-
-      // --- AOI layer stub ---
-      map.addSource('aoi-source', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] },
-      })
-
-      map.addLayer({
-        id: 'aoi-fill',
-        type: 'fill',
-        source: 'aoi-source',
-        paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.1 },
-      })
-
-      map.addLayer({
-        id: 'aoi-outline',
-        type: 'line',
-        source: 'aoi-source',
-        paint: { 'line-color': '#3b82f6', 'line-width': 2 },
-      })
     })
 
     mapRef.current = map
@@ -137,6 +218,7 @@ export default function MapView() {
     return () => {
       map.remove()
       mapRef.current = null
+      drawRef.current = null
     }
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -165,21 +247,24 @@ export default function MapView() {
     source.setData({ type: 'FeatureCollection', features })
   }, [analysisResults])
 
-  // Update AOI layer when aoi changes
+  // When isDrawing toggled from the panel, activate draw mode
   useEffect(() => {
-    const map = mapRef.current
-    if (!map || !map.isStyleLoaded()) return
-    const source = map.getSource('aoi-source') as maplibregl.GeoJSONSource
-    if (!source) return
-    if (aoi) {
-      source.setData({ type: 'FeatureCollection', features: [aoi] })
-    } else {
-      source.setData({ type: 'FeatureCollection', features: [] })
+    if (isDrawing && drawRef.current) {
+      drawRef.current.deleteAll()
+      drawRef.current.changeMode('draw_polygon')
     }
-  }, [aoi])
+  }, [isDrawing])
 
   return (
-    <div ref={mapContainerRef} className="w-full h-full" />
+    <div className="relative w-full h-full">
+      <div ref={mapContainerRef} className="w-full h-full" />
+      {/* AOI area indicator */}
+      {aoi && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-gray-800/90 text-white text-xs px-3 py-1.5 rounded-full border border-gray-600 pointer-events-none">
+          AOI: {useAppStore.getState().aoiAreaKm2?.toFixed(1) ?? '?'} km²
+        </div>
+      )}
+    </div>
   )
 }
 
