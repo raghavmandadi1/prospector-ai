@@ -74,11 +74,28 @@ forces it, so **this is the path you are almost certainly on.**
 Combined with (1): on a default dev run, no agent sees database evidence and four of six
 have no domain grounding either.
 
-### 3. Almost no tests
+### 3. Tests exist now, but only for the new machinery
 
-Two standalone smoke scripts in `backend/tests/`, run by hand (`python3
-backend/tests/test_run_telemetry.py`). No pytest, conftest, vitest, or CI. They cover the
-run-telemetry and cancellation paths only:
+`pytest` is installed and 62 tests pass:
+
+```bash
+.venv/bin/python -m pytest backend/tests -q
+```
+
+They cover the fixed grid (`test_grid.py`), run records and the cell cache
+(`test_run_record_and_cache.py`), the whole pipeline with a stubbed LLM
+(`test_orchestrator_integration.py`), the toponym matcher (`test_toponyms.py`),
+and TypeScript/Python projection parity (`test_grid_frontend_parity.py` — runs
+the real `coords.ts` under `node --experimental-strip-types` and compares against
+pyproj, so the map and the backend cannot silently disagree about which cell the
+cursor is over).
+
+**`engine.py`'s scoring maths is still uncovered.** The integration test asserts
+the composite is non-degenerate and in range, which is enough to catch the
+all-zero-scores class of bug, but `_weighted_mean` and `normalize_relative` have
+no direct unit tests. That is the highest-leverage unclaimed test work left.
+
+Two older standalone smoke scripts are still run by hand and need a live uvicorn:
 
 - `test_run_telemetry.py` — stubs `anthropic.AsyncAnthropic`, runs a full job through a
   live uvicorn, and asserts the token ledger sums correctly, that a `max_tokens` stop
@@ -89,8 +106,21 @@ run-telemetry and cancellation paths only:
 Both also assert live that spatial context is dead (Known Gap #2) and that `structure` runs
 ungrounded (Known Gap #1) — they will start failing when those are fixed, which is the point.
 
-**Still unverified: scoring math.** `engine.py` and `grid.py` have no coverage at all.
 `npm run lint` still fails (eslint neither installed nor configured); use `npm run typecheck`.
+
+### 3b. Benchmark ground truth is unverified
+
+`benchmarks/labels.yaml` exists and `scripts/benchmark.py` runs, but the file
+carries `verified: false`: every coordinate in it is an approximate district
+centre, not a survey position, and no `known_workings` entry has been filled in.
+The harness deliberately **refuses to report working-percentile or recall@high**
+until that flag flips, because draft coordinates produce confident numbers about
+the wrong cells. Separation, flatness and grounded fraction do not depend on
+point coordinates and are reported.
+
+No control AOIs are selected yet, and no noise floor has been established
+(needs ≥2 runs of one AOI on one clean commit with `CACHE_ENABLED=false`), so no
+benchmark delta can currently be called an improvement.
 
 ### 4. Stubs and unused infrastructure
 
@@ -100,11 +130,31 @@ ungrounded (Known Gap #1) — they will start failing when those are fixed, whic
   Zero usage in `backend/app`. Object storage is entirely aspirational.
 - **LangGraph** — in `requirements.txt`, imported nowhere. Orchestration is plain
   `asyncio.gather`.
-- `EQUAL_WEIGHTS` in `weights.py` is never referenced; `orchestrator.py:147` falls back to
+- `EQUAL_WEIGHTS` in `weights.py` is never referenced; the orchestrator falls back to
   `{}` and `_weighted_mean` defaults each missing agent to 1.0. Same behavior, different
   code path than the one previously documented here.
 - **608 MB of WA DNR geodatabases** sit in `data/raw/` referenced by no code at all.
+  `Gold_Silver_Locations` is now the *blocking* gap for toponym corroboration —
+  see Known Gap #5.
 - No export endpoint exists, in either mode.
+
+### 5. No occurrence data on disk, so toponym corroboration is inert
+
+`data/reference/wa_occurrences.geojson` is not built. The USGS MRDS WFS returns
+**403 to tiled bbox requests**, so the obvious scripted path does not work.
+
+Consequence: `toponyms.matcher._corroborate()` runs, but with an empty
+occurrence list every hit comes back `corroboration: "unknown"` rather than
+corroborated/uncorroborated, and `score_cap_for()` therefore applies the
+uncorroborated cap to everything. The single highest-value step in the toponym
+workstream — "is there a recorded occurrence near this name?" — is wired and
+untested against real data.
+
+The better source is already on disk: `Gold_Silver_Locations` and
+`Metallic_Mineral_Occurences` in the WA DNR geodatabase under `data/raw/`. A
+couple of hours of `ogr2ogr` would produce the file and light this up. The
+`Known occurrences` layer toggle in the map's layer panel is greyed out until
+it exists — `/reference/layers` reports which overlays are actually built.
 
 ---
 
@@ -151,8 +201,9 @@ Phase 3 — Multi-Agent Analysis
 | Execution | in-process `asyncio.Task` | Celery task on the `worker` service |
 | SSE transport | `asyncio.Queue` streamed on the POST response | Redis pub/sub on `job:{id}:events` |
 | Anthropic key | sent in the **request body** from the UI | read from `.env` |
-| Persistence | none — results live in the browser only | `analysis_jobs` table |
+| Persistence | `data/runs/*.json` + `data/cache/cells.sqlite` (both modes) | also `analysis_jobs` table |
 | `/channels`, `/features` | **404** — ChannelDashboard tab is broken | working |
+| `/cache/*`, `/reference/*` | working — they read files, not Postgres | working |
 | Spatial context | fails, agents get empty context (Known Gaps #2) | works if the DB is populated |
 | Stop / cancel | working — client aborts the fetch, generator polls `is_disconnected()`, task is cancelled | **not wired** — no cancel endpoint for the Celery path |
 
@@ -173,6 +224,7 @@ in the `default` branch as "Unhandled event".
 | `batch_started` | **agent** | batch index/count, cell count, prompt chars |
 | `batch_complete` | **agent** | tokens in/out, `duration_ms`, `cells_scored`/`cells_requested`, `parse_status`, `stop_reason`, response preview |
 | `batch_failed` | **agent** | batch index, error string |
+| `cache_status` | **agent** | cell cache `hits` / `misses` (only when there were hits) |
 | `agent_complete` | orchestrator | status, cells scored, `knowledge_file`, `warnings`, `usage` |
 | `usage` | orchestrator | job token totals, `est_cost_usd`, `by_agent`, `ungrounded_agents` |
 | `results` | `analysis_dev.py` | `final_scores`, `agent_results` (dev path only) |
@@ -228,6 +280,11 @@ prospector-ai/
 │       │       └── historical/      ← ONLY gold.md
 │       │           └── gold.md      ← WA gold districts, production, claims/GLO interpretation
 │       │       (no structure/, geochemistry/, proximity/, remote_sensing/, no default.md)
+│       ├── knowledge/toponyms/       ← versioned lexicons, hashed into run provenance
+│       │   └── gold_wa.yaml          ← 5 tiers, incl. a MEASURED anti-signal list
+│       ├── toponyms/matcher.py       ← deterministic GNIS matcher, stream-aware, capped
+│       ├── runs/record.py            ← RunRecorder: provenance, inputs, outputs, raw LLM
+│       ├── cache/cell_cache.py       ← SQLite per-cell score cache
 │       ├── connectors/              ← data source integrations
 │       │   ├── base_connector.py    ← abstract base: fetch(bbox), normalize(raw)
 │       │   ├── usgs_mrds.py         ← USGS MRDS via WFS — WORKING (no pagination, 1000 cap)
@@ -244,7 +301,8 @@ prospector-ai/
 │       │   ├── grid.py              ← generate_grid(), interpolate_to_fine_grid() (IDW)
 │       │   └── weights.py           ← mineral-specific default weight presets
 │       ├── api/
-│       │   ├── analysis_dev.py      ← DEV_MODE path: in-process run, SSE on the POST response
+│       │   ├── analysis_dev.py      ← DEV_MODE path: in-process run, SSE on POST + /cache/*
+│       │   ├── reference.py         ← /reference/{layers,wilderness,toponyms,occurrences}
 │       │   ├── channels.py          ← CRUD for data channel configs   (prod only)
 │       │   ├── features.py          ← bbox-filtered GeoJSON feature query (prod only)
 │       │   └── analysis.py          ← job submit / status / SSE via Redis (prod only; no export)
@@ -255,15 +313,25 @@ prospector-ai/
 │       │   └── agent_result.py      ← AgentResult + ScoredCell Pydantic models
 │       ├── db/session.py
 │       └── config.py
-├── backend/tests/                   ← hand-run smoke scripts, no pytest (see Known Gaps #3)
-│   ├── test_run_telemetry.py        ← full run: token ledger, parse health, grounding rollup
-│   └── test_run_cancellation.py     ← close the stream mid-run, assert LLM calls stop
+├── backend/tests/                   ← pytest (62 tests) + two hand-run smoke scripts
+│   ├── test_grid.py                 ← fixed-grid acceptance criteria, statewide coverage
+│   ├── test_run_record_and_cache.py ← cache hit/miss/invalidation, no-secrets, no relative fields
+│   ├── test_orchestrator_integration.py ← whole pipeline with a stubbed LLM
+│   ├── test_toponyms.py             ← lexicon, false friends, stream attribution, caps
+│   ├── test_grid_frontend_parity.py ← coords.ts under node vs pyproj
+│   ├── test_run_telemetry.py        ← hand-run: token ledger, parse health, grounding rollup
+│   └── test_run_cancellation.py     ← hand-run: close the stream mid-run, assert LLM calls stop
 ├── frontend/
 │   └── src/
 │       ├── App.tsx                  ← flex shell; tab switcher is LOCAL state, not the store
 │       ├── main.tsx
-│       ├── components/              ← one .tsx per directory, no sub-components
-│       │   ├── Map/MapView.tsx      ← MapLibre + draw tool + the results choropleth
+│       ├── components/              ← one .tsx per directory, except Map/
+│       │   ├── Map/MapView.tsx      ← MapLibre + draw tool + choropleth + overlays
+│       │   ├── Map/basemaps.ts      ← USGS services, per-service zoom limits, glyphs
+│       │   ├── Map/coords.ts        ← EPSG:5070 + UTM + DMS parsing (mirrors grid.py)
+│       │   ├── Map/drawStyles.ts    ← MapLibre-safe replacement for the draw theme
+│       │   ├── Map/LayerPanel.tsx   ← basemap radio, results opacity, overlay toggles
+│       │   └── Map/CoordinateReadout.tsx ← DD / DMS / UTM / cell id under cursor
 │       │   ├── AnalysisPanel/       ← API key, AOI, mineral, weights, agent progress, Past Runs
 │       │   ├── ResultsOverlay/      ← summary bar + legend + Relative/Absolute toggle
 │       │   ├── ChannelDashboard/    ← channel list + sync (404s under DEV_MODE)
@@ -274,10 +342,18 @@ prospector-ai/
 │       ├── store/index.ts           ← single flat Zustand store, no middleware, no persist
 │       ├── api/client.ts            ← typed API client (several exports are dead code)
 │       └── types/index.ts
+├── benchmarks/
+│   ├── labels.yaml                  ← ground truth — verified: FALSE, see Known Gaps #3b
+│   └── baselines/                   ← frozen benchmark results to diff against
 ├── scripts/
+│   ├── benchmark.py                 ← offline harness over data/runs/
+│   ├── build_gnis_extract.py        ← builds data/reference/gnis_wa.tsv
 │   ├── convert_of00_495.sh          ← GDAL-in-Docker .e00 → GeoTIFF/EPSG:4326 conversion
 │   └── extract_pdfs.py              ← PDF triage + text extraction for docs/intake_analyses/
 ├── data/                            ← see data/README.md; raw/ is gitignored and UNUSED by code
+│   ├── reference/                   ← tracked: gnis_wa.tsv, wa_wilderness.geojson
+│   ├── runs/                        ← gitignored: one JSON per analysis
+│   └── cache/cells.sqlite           ← gitignored: per-cell score cache
 ├── tileserver/config.yaml           ← Martin; serves exactly one table (public.features)
 ├── run-dev.sh                       ← primary local dev path — no Docker, forces DEV_MODE=true
 ├── docker-compose.yml
@@ -290,6 +366,7 @@ prospector-ai/
     ├── 05_western_wa_mvp.md
     ├── 05_knowledge_base_intake_2026-05-04.md
     ├── 06_data_sourcing_checklist.md
+    ├── 07_stable_cell_ids.md              ← grid/cache/benchmark design + 2 spec departures
     ├── geoprospector_critique.md
     └── intake_analyses/                   ← per-source extracts from the scanned literature
 ```
@@ -402,6 +479,44 @@ AgentResult(
 `confidence=0.0` is load-bearing: it is how a cell the LLM skipped is distinguished from a
 cell the LLM scored as genuinely poor. Never let a parse failure emit `confidence>0`.
 The frontend mirror lives in `frontend/src/types/index.ts` and must be kept in sync.
+
+### Cell IDs are globally anchored — do not reintroduce AOI-relative ones
+
+`scoring/grid.py` indexes cells off a **fixed grid** in EPSG:5070 (NAD83 / Conus
+Albers), not off the AOI's bounding box:
+
+```
+wa5070-1000m-000349-000380     # <grid>-<resolution>-<col>-<row>
+```
+
+A given `cell_id` always names the same square of earth, which is what makes the
+cell cache, run records and the benchmark possible. Three rules follow:
+
+- **Resolutions must come from `RESOLUTION_LADDER`** `[125, 250, 500, 1000, 2000,
+  4000, 8000]`. Each step is 2× the last and shares the origin, so cells nest as a
+  quadtree and `parent_cell_id()` is exact containment. `snap_to_ladder()` coerces
+  anything else; coarsening walks the ladder rather than multiplying by 2.
+- **EPSG:5070, not UTM.** A single UTM zone cannot cover Washington — zone 10N ends
+  at 120°W, and Republic, Metaline, Toroda Creek and Colville all sit east of it.
+  Republic is the most-cited district in `knowledge/historical/gold.md`. AOIs
+  outside `WA_BOUNDS` raise `AOIOutOfRangeError`. Full reasoning in
+  `docs/07_stable_cell_ids.md`.
+- **`geometry` is unclipped, `display_geometry` is clipped.** The canonical square
+  is what gets cached and what the LLM reasons about; the AOI intersection is for
+  rendering only. `engine.synthesize()` puts `display_geometry` on the ScoredCell.
+
+`frontend/src/components/Map/coords.ts` reimplements the projection so the map can
+show the cell id under the cursor. `backend/tests/test_grid_frontend_parity.py`
+runs that TypeScript under node and compares against pyproj — if you change a grid
+constant, change it in both places or that test fails.
+
+### Prompts use short batch labels, not cell IDs
+
+Canonical ids are 26 characters. Making the model retranscribe 50 of them per
+call costs output tokens and invites digit errors that silently drop cells into
+the zero-confidence fill path. `cell_summary()` emits `c1`, `c2`, … and
+`parse_llm_response()` maps them back (it accepts canonical ids too). Nothing
+outside the prompt ever sees a label.
 
 ### Scoring Tiers — AOI-Relative
 
@@ -561,6 +676,9 @@ source of truth** — it uses Docker service hostnames (`@postgres:5432`, `redis
 | `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` | `config.py` | prod path only |
 | `ANTHROPIC_API_KEY` | `config.py` | required for `DEV_MODE=false`; in dev the **UI** supplies it in the request body |
 | `MINDAT_API_KEY` | `config.py` | required only for the mindat connector |
+| `SAVE_RUN_RECORDS` | `config.py` | default **true** — one JSON per run in `data/runs/` |
+| `SAVE_RAW_LLM` | `config.py` | default **true** — keep raw responses in the run record |
+| `CACHE_ENABLED` | `config.py` | default **true**. Set false for benchmark noise-floor runs |
 | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | `config.py` | **declared and read by nothing.** No boto3/S3 code exists in `backend/app`. |
 | `POSTGRES_HOST/PORT/DB/USER/PASSWORD` | `docker-compose.yml` only | absent from `config.py` |
 | `AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY/ENDPOINT_URL` | **nothing** | absent from `config.py` |
@@ -638,20 +756,33 @@ Track progress in `docs/03_implementation_plan.md`.
       because `VITE_TILESERVER_URL` is unset, and `/features` 404s under DEV_MODE
 - [~] **M3: Full data layer** — 4 of 6 connectors real, `blm_mlrs` + `glo_records` are stubs;
       no loader for the 608 MB of local WA DNR / USGS data
-- [ ] **M4: Scoring foundation** — grid + engine are written and behave correctly on
-      inspection, but there is **not one test in the repo**. This stays unchecked until there is.
+- [~] **M4: Scoring foundation** — grid rewritten onto a fixed, globally-anchored
+      quadtree and covered by tests; `engine.py`'s weighted mean and relative
+      normalization still have no direct unit tests (Known Gaps #3)
 - [x] **M5: First end-to-end analysis** — full job runs draw → agents → synthesis → grid
 - [x] **M6: Full UI** — draw → run → results → evidence drawer, plus Relative/Absolute
       toggle, Past Runs, and the RunLog console (live token/cost ledger, per-batch event
       stream, grounding readout, Stop)
-- [ ] **M7: Production-ready MVP** — no export endpoint, no tests, no CI, no working lint;
-      four agents ungrounded and spatial context dead in dev (Known Gaps #1, #2)
+- [~] **M7: Production-ready MVP** — runs now persist (`data/runs/`), scores cache
+      across runs, and `scripts/benchmark.py` exists; still no export endpoint, no CI,
+      no working lint, unverified benchmark ground truth (#3b), four agents ungrounded
+      (#1), spatial context dead in dev (#2), and no occurrence data (#5)
 
 `[~]` = partially done.
 
 ---
 
-*Last updated: 2026-08-01 — documentation audited line-by-line against the source and
+*Last updated: 2026-08-01 (second pass) — implemented Workstreams A, B and C of
+"steps for raghav". Grid rewritten onto fixed EPSG:5070 cell ids with a nesting
+resolution ladder; run records, a SQLite cell cache and an offline benchmark
+harness added; USGS basemaps, orientation controls, a layer panel and reference
+overlays added to the map; a deterministic GNIS toponym matcher added. 62 pytest
+tests where there were none. Two deliberate departures from that spec — the
+analysis CRS and the default basemap — are argued from measurements in
+`docs/07_stable_cell_ids.md`. Known Gaps #3b and #5 are new and both block
+trusting benchmark output.*
+
+*Previously, 2026-08-01 — documentation audited line-by-line against the source and
 corrected. Removed the LangGraph claim (never imported); documented the DEV_MODE vs prod
 split and `analysis_dev.py`; marked `blm_mlrs`/`glo_records` as stubs and MinIO/boto3 as
 unused; recorded that only 2 of 6 agents have knowledge files and that the PostGIS

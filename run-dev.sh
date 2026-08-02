@@ -16,6 +16,14 @@ export DEV_MODE=true
 export APP_ENV=development
 export CORS_ORIGINS=http://localhost:5173
 
+# --no-cache forces every cell through the LLM instead of reading
+# data/cache/cells.sqlite. Use it when measuring the benchmark's noise floor —
+# cached runs are deterministic by construction and would report a floor of zero.
+if [ "$1" = "--no-cache" ]; then
+    export CACHE_ENABLED=false
+    echo "Cell cache DISABLED — every cell will be scored by the LLM"
+fi
+
 echo "Starting GeoProspector in dev mode..."
 echo "  Backend:  http://localhost:8000"
 echo "  Frontend: http://localhost:5173"
