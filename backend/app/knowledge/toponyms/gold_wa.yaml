@@ -1,0 +1,247 @@
+# Toponymic lexicon — Washington gold
+#
+# Deterministic regex matching against USGS GNIS feature names. No LLM decides
+# what counts as a match; the LLM only interprets what the matcher found. That
+# is what keeps this feature reproducible run to run, which the benchmark
+# requires.
+#
+# This file is hashed into the run record's provenance block and into the cell
+# cache key, so editing it invalidates affected cached scores and shows up in
+# benchmark diffs. Bump `version` when you change terms.
+#
+# STATUS: starting set, written from general mining-history vocabulary rather
+# than Washington-specific knowledge. Tiers 4 and 5 in particular need domain
+# review — see §26 of "steps for raghav" and the notes on each tier below.
+
+version: "2026-08-01-draft"
+mineral: gold
+region: washington
+
+tiers:
+  1:
+    name: direct_workings
+    weight: 1.00
+    description: >
+      Names that describe a working directly. The strongest toponymic signal
+      available: someone dug here and the map remembers.
+    terms:
+      - Mine
+      - Mines
+      - Mining
+      - Adit
+      - Shaft
+      - Stamp
+      - Arrastra
+      - Arastra
+      - Smelter
+      - Concentrator
+      - Assay
+      - Placer
+      - Sluice
+      - Diggings
+      - Claim
+      - Prospector
+      - Miner
+      - Miners
+      # `Discovery`, `Prospect` and `Tunnel` were in this tier in the first
+      # draft and are now demoted — see the anti-signal notes in tier 5. They
+      # matched 8, 7 and 7 WA features respectively and almost none of them
+      # were mining. Terms below are the ones that survived that check.
+      - Glory Hole
+      - Highgrade
+      - High Grade
+      - Payday
+      - Pay Streak
+      # Kept as general terms; specific WA false friends are suppressed in tier 5
+      - Tunnel
+      - Prospect
+      - Discovery
+
+  2:
+    name: mining_culture
+    weight: 0.85
+    description: >
+      Aspirational and borrowed district names. Assigned by people who were
+      thinking about ore, whether or not they found any.
+    terms:
+      - Bonanza
+      - Eldorado
+      - El Dorado
+      - Klondike
+      - Comstock
+      - Mother Lode
+      - Motherlode
+      - Bullion
+      - Nugget
+      - Gold
+      - Golden
+      - Goldie
+      - Silver
+      - Ruby
+      - Treasure
+      - Lucky
+      - Independence
+      - Monte Cristo
+      - Cleopatra
+      - Sultan
+      - Emerald
+      - Jackpot
+
+  3:
+    name: ore_and_gangue
+    weight: 0.60
+    description: >
+      Mineralogy in the name. Often descriptive of real outcrop, but "Copper"
+      and "Iron" are also common settler surnames and stock names.
+    terms:
+      - Quartz
+      - Galena
+      - Pyrite
+      - Sulphur
+      - Sulfur
+      - Cinnabar
+      - Copper
+      - Iron
+      - Lead
+      - Antimony
+      - Arsenic
+      - Mica
+      - Marble
+      - Lime
+      - Limestone
+      - Graphite
+      - Molybdenum
+      - Talc
+      - Asbestos
+      - Chrome
+      - Chromite
+
+  4:
+    name: alteration_and_gossan
+    weight: 0.40
+    description: >
+      Colour names for visually striking outcrop. "Red Mountain" and "Iron
+      Mountain" frequently record an iron-stained gossan — the oxidised cap of
+      a sulfide body — which is exactly the surface expression the remote
+      sensing agent looks for. Weak as a toponym, geologically real.
+      Only counted on landform features (see landform_only below).
+    landform_only: true
+    terms:
+      - Red
+      - Rusty
+      - Rust
+      - Ochre
+      - Ocher
+      - Vermilion
+      - Vermillion
+      - Painted
+      - Alum
+      - Yellow
+      - Brimstone
+      - Sulphur Springs
+
+  5:
+    name: anti_signal
+    weight: 0.0
+    description: >
+      Known false friends. A matcher that only knows positive terms will
+      confidently flag every Goldmyer and Mill Creek in the Cascades. A hit
+      here suppresses the name entirely and is logged so the list can be
+      evaluated against observed false positives.
+
+      REVIEW NEEDED: `Goldmyer` is here on the strength of the surname pattern
+      (Goldmyer Hot Springs, Middle Fork Snoqualmie), which §25 of the spec
+      flags as needing confirmation before it is used as a test case. Treat
+      the entry as provisional.
+
+      MEASURED, not assumed: the entries below the "false-friend families"
+      marker were added after running the first-draft lexicon over all 22,712
+      WA GNIS names and reading the tier-1 output. Roughly half of the 51
+      strongest-tier hits were not mining at all, in three systematic families:
+
+        * Ship names. Discovery Bay, Port Discovery, Discovery Peak, Camp
+          Discovery, Discovery Junction and both Discovery Creeks trace to
+          HMS Discovery (Vancouver, 1792), not to a mineral discovery.
+        * Railroad and road tunnels. Tunnel Creek (×4), Tunnel Island, Tunnel
+          Flat, Tunnel Point Channel — Cascade/Stampede tunnel country, not
+          adits.
+        * Scenery. Prospect Point, Prospect Peak, Prospect Ridge, Prospect
+          Canyon — a prospect is also a view.
+
+      Each of those words is still a genuine mining term elsewhere, so they are
+      suppressed by their *full* WA feature names rather than as bare words.
+      That keeps a future "Tunnel Gulch" or "Discovery Claim" scoring.
+    terms:
+      # Surname patterns — mineral-looking, no mineral content
+      - Goldmyer
+      - Goldsmith
+      - Goldsborough
+      - Goldendale
+      - Goldbar
+      - Gold Bar          # railroad townsite naming, not a working
+      - Silverdale
+      - Silverton         # ambiguous in WA; suppressed pending review
+      - Silvernail
+      - Silvers
+      - Ironwood
+      - Coppermine Road
+      # Ambiguous industrial
+      - Mill              # far more often a sawmill than a stamp mill
+      - Millpond
+      - Mill Creek
+      - Milltown
+      - Sawmill
+      # Fish and water colour, not metal
+      - Silver Salmon
+      - Silverside
+
+      # --- false-friend families (measured — see description above) ---
+      # HMS Discovery, not a mineral discovery
+      - Discovery Bay
+      - Port Discovery
+      - Discovery Peak
+      - Discovery Junction
+      - Camp Discovery
+      - Discovery Creek
+      - Discovery Lake
+      # Railroad and highway tunnels
+      - Tunnel Creek
+      - Tunnel Island
+      - Tunnel Flat
+      - Tunnel Point
+      # A prospect is also a view
+      - Prospect Point
+      - Prospect Peak
+      - Prospect Ridge
+      - Prospect Canyon
+
+# --- Matching behaviour ---------------------------------------------------
+
+matching:
+  # Whole-word, case-insensitive. "Goldie" must not match inside "Marigold",
+  # and "Iron" must not match "Ironwood" (which is separately an anti-signal).
+  word_boundary: true
+  # Feature classes that count as landforms for tier 4's landform_only rule.
+  landform_classes: [Summit, Ridge, Cliff, Range, Slope, Pillar, Bench, Basin, Gap]
+  # Feature classes to ignore entirely — a populated place named Goldbar tells
+  # you about a railroad promoter, not about the rock.
+  excluded_classes: [Civil, Census, Military]
+
+# --- Corroboration and caps (§21.1, §22) ----------------------------------
+
+corroboration:
+  # A toponym within this distance of a recorded occurrence is "corroborated":
+  # the occurrence already scored the cell, so the name adds legibility only.
+  corroborated_within_km: 1.5
+  # Beyond this with nothing nearby, the name is uncorroborated — a lead for a
+  # human, never a score.
+  uncorroborated_beyond_km: 5.0
+
+caps:
+  # Toponymic evidence sits BELOW district proximity in the assay-primacy
+  # hierarchy established in knowledge/historical/gold.md.
+  uncorroborated_tier_1_2: 0.45   # may never alone promote a cell to `high`
+  uncorroborated_tier_3_4: 0.30
+  # A cluster of independent tier 1–2 names is harder to explain as coincidence
+  cluster_bonus: 0.10
+  cluster_min_names: 3

@@ -74,7 +74,9 @@ def synthesize(
         final_cells.append(
             ScoredCell(
                 cell_id=cell.cell_id,
-                geometry=cell.geometry,
+                # Cells are scored on their full square but drawn clipped to the
+                # AOI, so the map never shows grid poking outside the polygon.
+                geometry=getattr(cell, "display_geometry", None) or cell.geometry,
                 score=composite,
                 confidence=confidence,
                 evidence=all_evidence[:20],  # Cap to keep payload manageable

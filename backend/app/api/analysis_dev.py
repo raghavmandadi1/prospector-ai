@@ -18,11 +18,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agents.orchestrator import OrchestratorAgent
-from app.scoring.grid import generate_grid
+from app.cache.cell_cache import get_cache
+from app.scoring.grid import cell_id_to_geojson
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["analysis-dev"])
+
+# Separate router: coverage is not scoped to a single analysis job.
+cache_router = APIRouter(prefix="/cache", tags=["cache"])
 
 # How long the SSE generator waits on the event queue before checking whether
 # the client is still there. Agents can go minutes between events, so without
@@ -162,6 +166,78 @@ async def get_job_dev(job_id: str):
         "status": "dev_mode",
         "message": "In dev mode, results are streamed directly via SSE on the POST response.",
     }
+
+
+@cache_router.get("/cells")
+async def cached_cells(
+    bbox: str,
+    mineral: Optional[str] = None,
+    max_cells: int = 8000,
+):
+    """Every cached composite cell intersecting `bbox` as GeoJSON.
+
+    Backs the persistent-coverage layer: everything scored to date, not just
+    this session's run. **Absolute scores only** — AOI-relative shading has no
+    common denominator across AOIs, so a `tier` here would contradict the map
+    it is drawn on.
+
+    Each feature also carries how old the score is and which knowledge-base
+    version produced it, so stale coverage is visible rather than assumed
+    current.
+    """
+    cache = get_cache()
+    if cache is None:
+        return {"type": "FeatureCollection", "features": [], "note": "cache disabled"}
+
+    try:
+        west, south, east, north = (float(v) for v in bbox.split(","))
+    except ValueError:
+        return {"type": "FeatureCollection", "features": [], "error": "bad bbox"}
+
+    rows = cache.composite_cells_in_bbox((west, south, east, north), mineral)
+    features: List[Dict[str, Any]] = []
+    for r in rows[:max_cells]:
+        agents = r["agents"]
+        # Unweighted confidence-weighted mean: the per-run weights are a user
+        # setting, and this layer spans many runs with different ones.
+        wsum = sum(a["confidence"] for a in agents.values())
+        score = (
+            sum(a["score"] * a["confidence"] for a in agents.values()) / wsum
+            if wsum
+            else 0.0
+        )
+        try:
+            geometry = cell_id_to_geojson(r["cell_id"])
+        except ValueError:
+            continue
+        features.append({
+            "type": "Feature",
+            "id": r["cell_id"],
+            "geometry": geometry,
+            "properties": {
+                "cell_id": r["cell_id"],
+                "score": round(score, 4),
+                "confidence": round(wsum / len(agents), 4) if agents else 0.0,
+                "agent_count": len(agents),
+                "agents": sorted(agents),
+                "mineral": r["mineral"],
+                "resolution_m": r["resolution_m"],
+                "scored_at": r["created_at"],
+            },
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "truncated": len(rows) > max_cells,
+        "total": len(rows),
+    }
+
+
+@cache_router.get("/stats")
+async def cache_stats():
+    cache = get_cache()
+    return cache.stats() if cache else {"available": False, "reason": "disabled"}
 
 
 @router.get("/jobs/{job_id}/events")

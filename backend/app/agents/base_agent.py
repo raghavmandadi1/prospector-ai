@@ -81,6 +81,18 @@ def estimate_cost_usd(
     )
 
 
+def batch_label(index: int) -> str:
+    """Short, batch-local label the LLM echoes back instead of the real id.
+
+    Canonical cell ids are globally anchored and long (`wa5070-1000m-000277-
+    000380`). Making the model retranscribe fifty of those per call costs output
+    tokens and invites digit errors that silently drop a cell into the
+    zero-confidence fill path. The label is mapped back to the canonical id in
+    parse_llm_response(); nothing outside the prompt ever sees it.
+    """
+    return f"c{index + 1}"
+
+
 def cell_summary(cells: List[Dict]) -> str:
     """Compact, human-readable cell list with center coordinates.
 
@@ -88,12 +100,12 @@ def cell_summary(cells: List[Dict]) -> str:
     tokens and were the reason prompts had to be capped at 50 cells.
     """
     lines = []
-    for c in cells:
+    for i, c in enumerate(cells):
         bbox = c.get("bbox", [0, 0, 0, 0])
         center_lon = (bbox[0] + bbox[2]) / 2
         center_lat = (bbox[1] + bbox[3]) / 2
         lines.append(
-            f'  - {c["cell_id"]}: center ({center_lat:.4f}, {center_lon:.4f})'
+            f"  - {batch_label(i)}: center ({center_lat:.4f}, {center_lon:.4f})"
         )
     return "\n".join(lines)
 
@@ -118,7 +130,7 @@ Return ONLY a JSON array covering ALL cells listed above. Use COMPACT JSON
 (no indentation, no spaces after separators) so the full array fits in the
 response. Do not include any text outside the JSON code block.
 ```json
-[{"cell_id":"c0_r0","score":0.75,"confidence":0.7,"evidence":["specific evidence string"],"data_sources_used":["source_name"]}]
+[{"cell_id":"c1","score":0.75,"confidence":0.7,"evidence":["specific evidence string"],"data_sources_used":["source_name"]}]
 ```"""
 
 
@@ -181,9 +193,27 @@ class BaseAgent(ABC):
                 "knowledge_chars": len(knowledge) if knowledge else 0,
             })
 
+            # --- Cache lookup ------------------------------------------------
+            # Split the grid into cells we already have an answer for and cells
+            # we need to pay for. Only the latter reach the LLM.
+            cached_cells, uncached, cache_keys = self._split_cached(
+                grid_cells, target_mineral, knowledge, spatial_context, config
+            )
+            if cached_cells:
+                logger.info(
+                    f"[{self.agent_id}] Cache: {len(cached_cells)} hits, "
+                    f"{len(uncached)} misses"
+                )
+                await self._emit(emit_fn, {
+                    "event": "cache_status",
+                    "agent_id": self.agent_id,
+                    "hits": len(cached_cells),
+                    "misses": len(uncached),
+                })
+
             batches = [
-                grid_cells[i : i + BATCH_SIZE]
-                for i in range(0, len(grid_cells), BATCH_SIZE)
+                uncached[i : i + BATCH_SIZE]
+                for i in range(0, len(uncached), BATCH_SIZE)
             ]
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
 
@@ -239,6 +269,8 @@ class BaseAgent(ABC):
             )
 
             scored: List[ScoredCell] = []
+            raw_batches: List[Dict[str, Any]] = []
+            fresh: List[ScoredCell] = []
             agent_notes: Optional[str] = None
             for i, res in enumerate(results):
                 if isinstance(res, BaseException):
@@ -259,7 +291,21 @@ class BaseAgent(ABC):
                 usage.cache_creation_tokens += call_usage.get("cache_creation_tokens", 0)
                 if agent_notes is None and response:
                     agent_notes = response[:1000]
-                scored.extend(cells)
+                fresh.extend(cells)
+                if settings.save_raw_llm:
+                    raw_batches.append({
+                        "batch": i,
+                        "request_cells": len(batches[i]),
+                        "response_text": response,
+                    })
+
+            scored.extend(fresh)
+            # Write the newly-scored cells back before the cached ones are
+            # merged in, so a re-run of the same AOI is a full hit.
+            self._store_in_cache(
+                fresh, cache_keys, target_mineral, config, grid_cells
+            )
+            scored.extend(cached_cells)
 
             # Fill any cells the LLM missed with zero-confidence placeholders.
             # confidence=0 means the scoring engine gives them zero weight.
@@ -302,6 +348,9 @@ class BaseAgent(ABC):
                 knowledge_file=(
                     f"{domain}/{knowledge_path.name}" if knowledge_path else None
                 ),
+                cache_hits=len(cached_cells),
+                cache_misses=len(uncached),
+                raw_batches=raw_batches,
             )
         except asyncio.CancelledError:
             # Raised when the client stops the run. Must propagate: swallowing
@@ -318,6 +367,152 @@ class BaseAgent(ABC):
                 warnings=[str(exc)],
                 usage=usage,
             )
+
+    # --- Cell cache ------------------------------------------------------
+    # All three helpers are best-effort: any failure is treated as a miss and
+    # the run proceeds exactly as it would have without a cache.
+
+    def _cache_keys(
+        self,
+        grid_cells: List[Dict],
+        target_mineral: str,
+        knowledge: Optional[str],
+        spatial_context: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """cell_id → cache key, hashing everything that could move the score."""
+        from app.cache.cell_cache import cache_key_for
+        from app.runs.record import PROMPT_VERSION, canonical_json, sha256_text
+
+        knowledge_hash = sha256_text(knowledge)
+        keys: Dict[str, str] = {}
+        for c in grid_cells:
+            cell_id = c.get("cell_id")
+            if not cell_id:
+                continue
+            # Per-cell context: what this agent was actually told about this
+            # patch of ground. Empty today (Known Gaps #2) — which is exactly
+            # why it must be in the key, so every cell invalidates the moment
+            # the PostGIS query starts returning rows.
+            ctx_hash = sha256_text(
+                canonical_json(self._cell_context(cell_id, spatial_context))
+            )
+            keys[cell_id] = cache_key_for(
+                cell_id=cell_id,
+                agent_id=self.agent_id,
+                mineral=target_mineral,
+                model=MODEL_NAME,
+                prompt_version=PROMPT_VERSION,
+                knowledge_hash=knowledge_hash,
+                spatial_context_hash=ctx_hash,
+            )
+        return keys
+
+    def _cell_context(
+        self, cell_id: str, spatial_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """The spatial-context slice that could influence this cell's score.
+
+        Agents currently build prompts from the AOI-wide record lists rather
+        than per-cell subsets, so the honest hash input is the whole domain
+        payload. Narrow this when agents start filtering by cell — a tighter
+        hash means fewer spurious invalidations, never more.
+        """
+        return {
+            k: v
+            for k, v in spatial_context.items()
+            if k not in ("grid_cells", "aoi_geojson") and isinstance(v, (list, str))
+        }
+
+    def _split_cached(
+        self,
+        grid_cells: List[Dict],
+        target_mineral: str,
+        knowledge: Optional[str],
+        spatial_context: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Tuple[List[ScoredCell], List[Dict], Dict[str, str]]:
+        """Partition the grid into (cached ScoredCells, cells needing the LLM, keys)."""
+        if not config.get("use_cache", True):
+            return [], list(grid_cells), {}
+        try:
+            from app.cache.cell_cache import get_cache
+
+            cache = get_cache()
+            if cache is None:
+                return [], list(grid_cells), {}
+            keys = self._cache_keys(
+                grid_cells, target_mineral, knowledge, spatial_context
+            )
+            found = cache.get_many(keys.values())
+            by_cell = {c.get("cell_id"): c for c in grid_cells}
+
+            hits: List[ScoredCell] = []
+            misses: List[Dict] = []
+            for cell_id, key in keys.items():
+                row = found.get(key)
+                if row is None:
+                    misses.append(by_cell[cell_id])
+                    continue
+                hits.append(
+                    ScoredCell(
+                        cell_id=cell_id,
+                        geometry=by_cell[cell_id].get("geometry", {}),
+                        score=row["score"],
+                        confidence=row["confidence"],
+                        # Relative fields are deliberately absent — they are
+                        # recomputed per AOI by engine.normalize_relative().
+                        evidence=row["evidence"],
+                        data_sources_used=row["data_sources_used"],
+                    )
+                )
+            # Cells with no id at all never had a key; they must still be scored.
+            misses.extend(c for c in grid_cells if not c.get("cell_id"))
+            return hits, misses, keys
+        except Exception as exc:
+            logger.warning(f"[{self.agent_id}] Cache lookup failed ({exc}) — full run")
+            return [], list(grid_cells), {}
+
+    def _store_in_cache(
+        self,
+        fresh: List[ScoredCell],
+        cache_keys: Dict[str, str],
+        target_mineral: str,
+        config: Dict[str, Any],
+        grid_cells: List[Dict],
+    ) -> None:
+        if not cache_keys or not fresh or not config.get("use_cache", True):
+            return
+        try:
+            from app.cache.cell_cache import get_cache
+
+            cache = get_cache()
+            if cache is None:
+                return
+            resolutions = {
+                c.get("cell_id"): c.get("resolution_m", 0) for c in grid_cells
+            }
+            rows = [
+                (
+                    cache_keys[c.cell_id],
+                    {
+                        "cell_id": c.cell_id,
+                        "resolution_m": resolutions.get(c.cell_id, 0),
+                        "agent_id": self.agent_id,
+                        "mineral": target_mineral,
+                        "score": c.score,
+                        "confidence": c.confidence,
+                        "evidence": c.evidence,
+                        "data_sources_used": c.data_sources_used,
+                    },
+                )
+                for c in fresh
+                # confidence 0 means "the LLM never scored this" — caching it
+                # would make a parse failure permanent.
+                if c.cell_id in cache_keys and c.confidence > 0
+            ]
+            cache.put_many(rows, run_id=config.get("run_id", "unknown"))
+        except Exception as exc:
+            logger.warning(f"[{self.agent_id}] Cache write failed ({exc})")
 
     @staticmethod
     async def _emit(emit_fn: Optional[Callable], payload: Dict[str, Any]) -> None:
@@ -456,8 +651,15 @@ class BaseAgent(ABC):
             logger.warning(f"[{self.agent_id}] Could not parse LLM response")
             return []
 
-        cell_map = {c.get("cell_id"): c for c in grid_cells}
+        # Accept either the short batch label the prompt used or the canonical
+        # cell id, so a model that echoes back the real id still parses.
+        cell_map: Dict[str, Dict[str, Any]] = {}
+        for i, c in enumerate(grid_cells):
+            cell_map[batch_label(i)] = c
+            if c.get("cell_id"):
+                cell_map[c["cell_id"]] = c
         scored = []
+        seen: set = set()
         for item in parsed:
             if not isinstance(item, dict):
                 continue
@@ -465,12 +667,19 @@ class BaseAgent(ABC):
             cell = cell_map.get(cell_id)
             if not cell:
                 continue
+            # A model that emits both the label and the canonical id for one
+            # cell must not score it twice.
+            canonical = cell.get("cell_id", cell_id)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
             evidence = item.get("evidence", [])
             if isinstance(evidence, str):
                 evidence = [evidence]
             scored.append(
                 ScoredCell(
-                    cell_id=cell_id,
+                    # Always the canonical id, never the batch label
+                    cell_id=canonical,
                     geometry=cell.get("geometry", {}),
                     score=_clamp(item.get("score"), 0.0),
                     confidence=_clamp(item.get("confidence"), 0.5),

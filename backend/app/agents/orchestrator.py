@@ -10,9 +10,10 @@ OrchestratorAgent coordinates the full analysis pipeline:
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional
 
-from app.agents.base_agent import BaseAgent
+from app.agents.base_agent import KNOWLEDGE_DIR, MODEL_NAME, BaseAgent
 from app.agents.lithology_agent import LithologyAgent
 from app.agents.structure_agent import StructureAgent
 from app.agents.proximity_agent import ProximityAgent
@@ -20,8 +21,14 @@ from app.agents.geochemistry_agent import GeochemistryAgent
 from app.agents.remote_sensing_agent import RemoteSensingAgent
 from app.agents.historical_agent import HistoricalAgent
 from app.models.agent_result import AgentResult
+from app.runs.record import RunRecorder, provenance_block
 from app.scoring.engine import synthesize, normalize_relative
-from app.scoring.grid import generate_grid, interpolate_to_fine_grid
+from app.scoring.grid import (
+    coarsen,
+    generate_grid,
+    interpolate_to_fine_grid,
+    snap_to_ladder,
+)
 from app.scoring.weights import DEFAULT_WEIGHTS
 from app.config import settings
 
@@ -45,6 +52,30 @@ AGENT_CLASSES = {
     "remote_sensing": RemoteSensingAgent,
     "historical": HistoricalAgent,
 }
+
+
+def _read_knowledge(knowledge_file: str) -> Optional[str]:
+    """Read a knowledge file by its `<domain>/<name>.md` label, for hashing."""
+    try:
+        return (KNOWLEDGE_DIR / knowledge_file).read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _aoi_area_km2(aoi_geojson: Dict[str, Any]) -> Optional[float]:
+    try:
+        import pyproj
+        from shapely.geometry import shape
+
+        geom = aoi_geojson
+        if geom.get("type") == "FeatureCollection":
+            geom = geom["features"][0]["geometry"]
+        elif geom.get("type") == "Feature":
+            geom = geom["geometry"]
+        area, _ = pyproj.Geod(ellps="WGS84").geometry_area_perimeter(shape(geom))
+        return round(abs(area) / 1_000_000, 2)
+    except Exception:
+        return None
 
 
 class OrchestratorAgent:
@@ -86,6 +117,16 @@ class OrchestratorAgent:
         if emit_fn is None:
             emit_fn = await self._make_redis_emitter(job_id)
 
+        recorder = RunRecorder(run_id=job_id)
+        # Agents read run_id off the config when writing cache rows, so cached
+        # scores stay traceable to the run that produced them.
+        config = {**config, "run_id": job_id}
+        started_at = time.monotonic()
+        agent_results: List[AgentResult] = []
+        # Held outside the try so the run record can report spatial-context
+        # availability even when the run dies before the query runs.
+        spatial_ctx_ref: Dict[str, Any] = {}
+
         try:
             await emit_fn({"event": "started", "job_id": job_id})
 
@@ -94,29 +135,35 @@ class OrchestratorAgent:
             # (≤ MAX_LLM_CELLS); if the user requested a finer display
             # resolution (e.g. 100 m), coarse scores are IDW-interpolated
             # down to it after synthesis.
-            resolution_m = float(config.get("resolution_m", 1000))
+            # Snap to the fixed ladder up front: the grid only nests (and so
+            # only caches) on ladder steps, and coarsening walks the same ladder.
+            requested_resolution_m = snap_to_ladder(config.get("resolution_m", 1000))
+            resolution_m = requested_resolution_m
 
-            # Cap the display grid size (a 100 m grid over a large AOI can
+            # Cap the display grid size (a 125 m grid over a large AOI can
             # produce tens of thousands of polygons)
             display_cells = generate_grid(aoi_geojson, resolution_m)
-            while len(display_cells) > MAX_DISPLAY_CELLS:
-                resolution_m *= 2
+            while len(display_cells) > MAX_DISPLAY_CELLS and coarsen(resolution_m) != resolution_m:
+                resolution_m = coarsen(resolution_m)
                 display_cells = generate_grid(aoi_geojson, resolution_m)
-            if resolution_m != float(config.get("resolution_m", 1000)):
+            if resolution_m != requested_resolution_m:
                 logger.info(
                     f"[{job_id}] Display resolution coarsened to "
-                    f"{resolution_m:.0f}m to stay under {MAX_DISPLAY_CELLS} cells"
+                    f"{resolution_m}m to stay under {MAX_DISPLAY_CELLS} cells"
                 )
 
-            analysis_resolution_m = float(resolution_m)
+            analysis_resolution_m = resolution_m
             grid_cells = generate_grid(aoi_geojson, analysis_resolution_m)
-            while len(grid_cells) > MAX_LLM_CELLS:
-                analysis_resolution_m *= 2
+            while (
+                len(grid_cells) > MAX_LLM_CELLS
+                and coarsen(analysis_resolution_m) != analysis_resolution_m
+            ):
+                analysis_resolution_m = coarsen(analysis_resolution_m)
                 grid_cells = generate_grid(aoi_geojson, analysis_resolution_m)
             if analysis_resolution_m != resolution_m:
                 logger.info(
                     f"[{job_id}] Display resolution {resolution_m}m → analysis "
-                    f"grid coarsened to {analysis_resolution_m:.0f}m "
+                    f"grid coarsened to {analysis_resolution_m}m "
                     f"({len(grid_cells)} cells for LLM scoring)"
                 )
                 await emit_fn({
@@ -125,10 +172,23 @@ class OrchestratorAgent:
                     "analysis_resolution_m": analysis_resolution_m,
                     "analysis_cell_count": len(grid_cells),
                 })
-            logger.info(f"[{job_id}] Generated {len(grid_cells)} grid cells at {analysis_resolution_m:.0f}m")
+            logger.info(f"[{job_id}] Generated {len(grid_cells)} grid cells at {analysis_resolution_m}m")
+
+            recorder.set_inputs(
+                aoi_geojson=aoi_geojson,
+                aoi_area_km2=_aoi_area_km2(aoi_geojson),
+                target_mineral=target_mineral,
+                weights=config.get("weights"),
+                enabled_agents=config.get("enabled_agents"),
+                requested_resolution_m=requested_resolution_m,
+                display_resolution_m=resolution_m,
+                analysis_resolution_m=analysis_resolution_m,
+                use_cache=config.get("use_cache", True),
+            )
 
             # 2. Build spatial context for each agent domain (PostGIS queries)
             spatial_context = await self._build_spatial_context(aoi_geojson, grid_cells)
+            spatial_ctx_ref = spatial_context
 
             # Report what the agents will actually see. This query fails
             # silently in DEV_MODE (no asyncpg), and a run where every count
@@ -153,7 +213,7 @@ class OrchestratorAgent:
                 for agent in agents
             ]
 
-            agent_results: List[AgentResult] = await asyncio.gather(*agent_tasks)
+            agent_results = list(await asyncio.gather(*agent_tasks))
             logger.info(f"[{job_id}] All agents completed")
 
             # Job-level token/cost rollup. Emitted before synthesis so the UI
@@ -196,7 +256,15 @@ class OrchestratorAgent:
                 "analysis_resolution_m": analysis_resolution_m,
             }
 
-            agent_results_dict = {r.agent_id: r.model_dump() for r in agent_results}
+            # raw_batches is megabytes of LLM text bound for the run record,
+            # not for the browser.
+            agent_results_dict = {
+                r.agent_id: r.model_dump(exclude={"raw_batches"})
+                for r in agent_results
+            }
+
+            recorder.set_composite_cells(scored_cells)
+            recorder.set_status("completed")
 
             await emit_fn({"event": "job_complete", "job_id": job_id, "status": "completed"})
 
@@ -206,11 +274,70 @@ class OrchestratorAgent:
             # User stopped the run. Do not emit — the client that would have
             # received the event is the one that just disconnected.
             logger.info(f"[{job_id}] Analysis cancelled")
+            recorder.set_status("cancelled")
             raise
         except Exception as exc:
             logger.exception(f"[{job_id}] Orchestrator failed: {exc}")
+            recorder.set_status("failed", error=f"{type(exc).__name__}: {exc}")
             await emit_fn({"event": "error", "message": str(exc)})
             raise
+        finally:
+            # A failed or cancelled run is diagnostically the most valuable
+            # kind, so the record is written on every path out of here.
+            self._finalize_record(
+                recorder, agent_results, spatial_ctx_ref, started_at
+            )
+
+    @staticmethod
+    def _finalize_record(
+        recorder: RunRecorder,
+        agent_results: List[AgentResult],
+        spatial_context: Dict[str, Any],
+        started_at: float,
+    ) -> None:
+        """Fill provenance/timings/cache and write the record. Never raises."""
+        try:
+            knowledge_files: Dict[str, Optional[str]] = {}
+            ungrounded: List[str] = []
+            hits = misses = 0
+            for r in agent_results:
+                if r.knowledge_file:
+                    knowledge_files[r.knowledge_file] = _read_knowledge(r.knowledge_file)
+                else:
+                    ungrounded.append(r.agent_id)
+                hits += r.cache_hits
+                misses += r.cache_misses
+                recorder.add_agent_result(r)
+
+            counts = {
+                k: len(v)
+                for k, v in spatial_context.items()
+                if k != "grid_cells" and isinstance(v, list)
+            }
+            recorder.set_provenance(
+                provenance_block(
+                    knowledge_files=knowledge_files,
+                    agents_without_knowledge=ungrounded,
+                    # "Available" means records actually reached the agents —
+                    # not merely that the query did not raise.
+                    spatial_context_available=(
+                        spatial_context.get("_error") is None
+                        and any(counts.values())
+                    ),
+                    model=MODEL_NAME,
+                )
+            )
+            recorder.set_timings(
+                total_s=round(time.monotonic() - started_at, 2),
+                per_agent_s={
+                    r.agent_id: round((r.usage.duration_ms if r.usage else 0) / 1000, 2)
+                    for r in agent_results
+                },
+            )
+            recorder.set_cache_stats(hits, misses)
+            recorder.write()
+        except Exception as exc:  # pragma: no cover — bookkeeping only
+            logger.warning(f"Run record finalization failed: {exc}")
 
     @staticmethod
     def _roll_up_usage(agent_results: List[AgentResult]) -> Dict[str, Any]:

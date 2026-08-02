@@ -1,0 +1,168 @@
+"""
+Whole-pipeline test with the Anthropic client stubbed: AOI in → grid → agents →
+synthesis → relative normalization → run record on disk.
+
+This is the test that would have caught the all-zero-scores bug in
+.claude/mistakes-log.md, which passed the "it ran without an exception" bar for
+weeks.
+
+Run:  .venv/bin/python -m pytest backend/tests/test_orchestrator_integration.py -q
+"""
+import json
+
+import pytest
+
+from app.agents import orchestrator as orch
+from app.agents.orchestrator import OrchestratorAgent
+from tests.test_run_record_and_cache import AOI, FakeClient
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def stubbed(tmp_path, monkeypatch):
+    """Every agent gets a fake client; records and cache go to tmp_path."""
+    counter = {"calls": 0}
+    from app.cache.cell_cache import CellCache
+
+    cache = CellCache(tmp_path / "cells.sqlite")
+    monkeypatch.setattr("app.cache.cell_cache.get_cache", lambda: cache)
+
+    real_init = orch.BaseAgent.__init__
+
+    def fake_init(self, api_key=None):
+        self._client = FakeClient(counter)
+
+    monkeypatch.setattr(orch.BaseAgent, "__init__", fake_init)
+
+    class Recorder(orch.RunRecorder):
+        def __init__(self, run_id=None, runs_dir=None, enabled=None):
+            super().__init__(run_id=run_id, runs_dir=tmp_path / "runs", enabled=True)
+
+    monkeypatch.setattr(orch, "RunRecorder", Recorder)
+    yield counter, tmp_path
+    monkeypatch.setattr(orch.BaseAgent, "__init__", real_init)
+
+
+async def run_once(config=None):
+    events = []
+
+    async def emit(payload):
+        events.append(payload)
+
+    final, agents = await OrchestratorAgent(api_key="stub").run_analysis(
+        job_id="job-1",
+        aoi_geojson=AOI,
+        target_mineral="gold",
+        config=config or {"resolution_m": 2000, "enabled_agents": ["lithology", "structure"]},
+        emit_fn=emit,
+    )
+    return final, agents, events
+
+
+async def test_full_run_produces_scores_and_a_record(stubbed):
+    counter, tmp_path = stubbed
+    final, agents, events = await run_once()
+
+    cells = final["scored_cells"]
+    assert cells, "a run must produce cells"
+
+    # The bug this suite exists for: everything scored zero and nobody noticed.
+    assert any(c["score"] > 0 for c in cells), "all-zero composite is the known bug"
+    assert all(0.0 <= c["score"] <= 1.0 for c in cells)
+    assert all(c["tier"] in ("high", "medium", "low", "negligible") for c in cells)
+
+    # Cell ids are the durable, globally-anchored kind
+    assert all(c["cell_id"].startswith("wa5070-") for c in cells)
+
+    # Exactly one record, and it is complete
+    records = list((tmp_path / "runs").glob("*.json"))
+    assert len(records) == 1
+    doc = json.loads(records[0].read_text())
+    assert doc["status"] == "completed"
+    assert doc["inputs"]["target_mineral"] == "gold"
+    assert doc["inputs"]["aoi_area_km2"] > 0
+    assert set(doc["agent_results"]) == {"lithology", "structure"}
+    assert doc["provenance"]["prompt_version"]
+    assert doc["timings"]["total_s"] >= 0
+    # structure has no knowledge file (Known Gaps #1) and the record says so
+    assert "structure" in doc["provenance"]["agents_without_knowledge"]
+    assert "lithology/gold.md" in doc["provenance"]["knowledge_files"]
+
+
+async def test_second_identical_run_costs_nothing(stubbed):
+    counter, tmp_path = stubbed
+    await run_once()
+    calls_after_first = counter["calls"]
+    assert calls_after_first > 0
+
+    final, agents, events = await run_once()
+    assert counter["calls"] == calls_after_first, "identical re-run must hit cache"
+
+    doc = json.loads(sorted((tmp_path / "runs").glob("*.json"))[-1].read_text())
+    assert doc["cache"]["misses"] == 0
+    assert doc["cache"]["hits"] > 0
+    # Same absolute scores, freshly recomputed tiers
+    assert any(c["score"] > 0 for c in final["scored_cells"])
+
+
+async def test_a_failed_run_still_leaves_a_record(stubbed, monkeypatch):
+    counter, tmp_path = stubbed
+    monkeypatch.setattr(
+        orch, "generate_grid", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("grid exploded"))
+    )
+    with pytest.raises(RuntimeError):
+        await run_once()
+
+    records = list((tmp_path / "runs").glob("*.json"))
+    assert len(records) == 1
+    doc = json.loads(records[0].read_text())
+    assert doc["status"] == "failed"
+    assert "grid exploded" in doc["error"]
+
+
+async def test_api_key_never_lands_in_the_record(stubbed):
+    counter, tmp_path = stubbed
+    await run_once(
+        config={
+            "resolution_m": 2000,
+            "enabled_agents": ["lithology"],
+            # A careless passthrough of the dev-mode request body
+            "weights": {"lithology": 1.0},
+        }
+    )
+    text = list((tmp_path / "runs").glob("*.json"))[0].read_text()
+    assert "sk-ant" not in text
+    assert "anthropic_api_key" not in text
+
+
+async def test_coarsening_walks_the_ladder(stubbed):
+    """A fine resolution over a large AOI must land on a ladder step."""
+    from app.scoring.grid import RESOLUTION_LADDER
+
+    counter, tmp_path = stubbed
+    final, _, events = await run_once(
+        config={"resolution_m": 125, "enabled_agents": ["lithology"]}
+    )
+    assert final["analysis_resolution_m"] in RESOLUTION_LADDER
+    assert final["display_resolution_m"] in RESOLUTION_LADDER
+    assert final["analysis_resolution_m"] >= final["display_resolution_m"]
+
+
+async def test_interpolated_cells_inherit_their_containing_parent(stubbed):
+    from app.scoring.grid import parent_cell_id
+
+    counter, tmp_path = stubbed
+    final, _, _ = await run_once(
+        config={"resolution_m": 125, "enabled_agents": ["lithology"]}
+    )
+    coarse = final["analysis_resolution_m"]
+    fine = final["display_resolution_m"]
+    if coarse == fine:
+        pytest.skip("no interpolation happened for this AOI size")
+
+    interpolated = [c for c in final["scored_cells"] if c.get("parent_cell_id")]
+    assert interpolated
+    for c in interpolated:
+        # Exact containment, not nearest-centre
+        assert c["parent_cell_id"] == parent_cell_id(c["cell_id"], coarse)

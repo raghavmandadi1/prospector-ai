@@ -11,3 +11,6 @@ python-dotenv
 geojson
 sqlalchemy>=2.0
 
+pyyaml
+pytest
+pytest-asyncio

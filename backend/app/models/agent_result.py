@@ -60,3 +60,10 @@ class AgentResult(BaseModel):
     # agent ran ungrounded (system=None). Surfaced in the UI run log — four
     # of six agents currently have no knowledge file at all.
     knowledge_file: Optional[str] = None
+    # Per-batch cache accounting, merged into the run record's cache block
+    cache_hits: int = 0
+    cache_misses: int = 0
+    # Raw LLM responses, one entry per batch. Written to the run record when
+    # SAVE_RAW_LLM is on and stripped before the result goes over SSE — it is
+    # megabytes of text the browser has no use for.
+    raw_batches: List[Dict[str, Any]] = Field(default_factory=list)

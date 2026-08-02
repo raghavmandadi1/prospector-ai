@@ -47,6 +47,14 @@ else:
     app.include_router(features.router, prefix="/api/v1")
     app.include_router(analysis.router, prefix="/api/v1")
 
+# Cached-coverage and reference layers are mode-independent: both read files on
+# disk (SQLite / static GeoJSON), not Postgres, so they work either way.
+from app.api import analysis_dev as _cache_routes  # noqa: E402
+from app.api import reference  # noqa: E402
+
+app.include_router(_cache_routes.cache_router, prefix="/api/v1")
+app.include_router(reference.router, prefix="/api/v1")
+
 
 @app.get("/health")
 async def health_check():

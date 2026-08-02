@@ -1,0 +1,128 @@
+# Benchmark ground truth.
+#
+# ⚠ DRAFT — NOT YET USABLE AS GROUND TRUTH.
+#
+# Every coordinate below is an approximate district centre taken from general
+# reference, not a surveyed position, and no `known_workings` entry has been
+# verified. Until Matthew checks these against WA DNR MRDS /
+# `Gold_Silver_Locations` and the historical literature in
+# docs/intake_analyses/, `scripts/benchmark.py` will refuse to report
+# working-percentile or recall metrics and will say why.
+#
+# Labels:
+#   positive  documented workings, production, or assayed occurrences
+#   control   plausible-looking ground, prospected historically, no documented
+#             occurrence. Hardest to source and the most diagnostic — a model
+#             that scores every batholith contact margin high passes on
+#             positives alone.
+#   null      ground that should obviously score low. Catches the failure mode
+#             where everything comes out at 0.7.
+#
+# `toponym_revealing: true` marks an AOI whose positives are legible from the
+# place names themselves. Those are excluded from the primary metrics — see
+# §23 and the --disable-toponyms discussion in the benchmark report.
+
+version: "2026-08-01-draft"
+verified: false          # ← Matthew sets this to true after checking coordinates
+
+aois:
+  # --- Positives ---------------------------------------------------------
+  monte_cristo:
+    label: positive
+    county: Snohomish
+    approx_center: [-121.44, 48.03]
+    toponym_revealing: true      # the district is literally named "Monte Cristo"
+    notes: >
+      Named in knowledge/historical/gold.md; significant historical production.
+      Toponym-revealing, so excluded from the headline metric.
+    known_workings: []           # TODO(Matthew): Pride of the Mountains, Mystery, etc.
+    expect: "known_working cells in top decile of AOI"
+
+  silver_creek_mineral_city:
+    label: positive
+    county: Snohomish
+    approx_center: [-121.35, 47.95]
+    toponym_revealing: true
+    notes: "Adjacent to Monte Cristo, separate workings."
+    known_workings: []
+
+  sunset_mine_index:
+    label: positive
+    county: Snohomish
+    approx_center: [-121.57, 47.83]
+    toponym_revealing: false
+    notes: "Index granodiorite contact setting. Blandly named — good AOI."
+    known_workings: []
+
+  money_creek_miller_river:
+    label: positive
+    county: King
+    approx_center: [-121.40, 47.70]
+    toponym_revealing: false
+    known_workings: []
+
+  sultan_basin:
+    label: positive
+    county: Snohomish
+    approx_center: [-121.65, 47.95]
+    toponym_revealing: true      # "Sultan" is a tier-2 lexicon term
+    known_workings: []
+
+  nf_snoqualmie_buena_vista:
+    label: positive
+    county: King
+    approx_center: [-121.55, 47.65]
+    toponym_revealing: false
+    notes: "PRIORITY AOI — the corridor the project is built around."
+    known_workings: []
+
+  lennox_creek_bear_creek:
+    label: positive
+    county: King
+    approx_center: [-121.50, 47.68]
+    toponym_revealing: false
+    notes: "Snoqualmie Batholith contact margin."
+    known_workings: []
+
+  # NE Washington. Absent from the original draft list, which was scoped to
+  # western WA — but knowledge/historical/gold.md cites Republic more than any
+  # other district in the state, so a benchmark without it does not measure the
+  # knowledge base the system actually has.
+  republic_eureka_gulch:
+    label: positive
+    county: Ferry
+    approx_center: [-118.74, 48.65]
+    toponym_revealing: false
+    notes: >
+      Republic graben, epithermal. The single most-cited district in the gold
+      knowledge base. UTM zone 11N — see the grid CRS note in scoring/grid.py.
+    known_workings: []
+
+  # --- Controls ----------------------------------------------------------
+  # TO BE SELECTED BY MATTHEW (§7): ground with comparable elevation, batholith
+  # proximity and structural setting to the positives, prospected historically
+  # without result. Target 4–6.
+
+  # --- Nulls -------------------------------------------------------------
+  puget_lowland_glacial:
+    label: "null"
+    county: King
+    approx_center: [-122.15, 47.45]
+    toponym_revealing: false
+    notes: "Thick unconsolidated Quaternary cover, no bedrock exposure."
+
+  snoqualmie_batholith_interior:
+    label: "null"
+    county: King
+    approx_center: [-121.42, 47.53]
+    toponym_revealing: false
+    notes: >
+      Right rock, wrong position. Tests whether the model understands contact
+      margins rather than just "granite = good".
+
+  hoh_accretionary_complex:
+    label: "null"
+    county: Jefferson
+    approx_center: [-124.10, 47.75]
+    toponym_revealing: false
+    notes: "Wrong terrane entirely."

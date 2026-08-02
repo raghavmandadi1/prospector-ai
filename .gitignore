@@ -54,6 +54,11 @@ logs/
 
 # Raw data — third-party GIS datasets, not committed (see data/README.md)
 data/raw/
+
+# Run records and the cell cache — machine-generated, per-developer, and the
+# raw-LLM blocks make them large. benchmarks/baselines/ IS tracked; these are not.
+data/runs/
+data/cache/
 # but keep the README and any human-curated docs we put in data/
 !data/README.md
 
