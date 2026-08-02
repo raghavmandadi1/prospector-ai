@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { DEFAULT_BASEMAP } from '../components/Map/basemaps'
 import type { AnalysisJob, AnalysisRun, LogEntry, RunUsage, ScoredCell } from '../types'
 
 type ActiveView = 'analysis' | 'channels' | 'results'
@@ -17,6 +18,66 @@ const EMPTY_USAGE: RunUsage = {
   llmCalls: 0,
   estCostUsd: 0,
 }
+
+export type OverlayId = 'plss' | 'wilderness' | 'toponyms' | 'occurrences' | 'coverage'
+
+export interface MapView {
+  lng: number
+  lat: number
+  zoom: number
+}
+
+// Map/layer preferences persist; run state deliberately does not. Written on
+// every change and read once at store creation.
+const PREFS_KEY = 'geoprospector.map.v1'
+
+interface MapPrefs {
+  basemap: string
+  resultsOpacity: number
+  resultsVisible: boolean
+  overlays: Record<OverlayId, boolean>
+  mapView: MapView | null
+}
+
+const DEFAULT_PREFS: MapPrefs = {
+  basemap: DEFAULT_BASEMAP,
+  resultsOpacity: 0.6,
+  resultsVisible: true,
+  overlays: {
+    plss: false,
+    wilderness: false,
+    toponyms: false,
+    occurrences: false,
+    coverage: false,
+  },
+  mapView: null,
+}
+
+function loadPrefs(): MapPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY)
+    if (!raw) return DEFAULT_PREFS
+    const parsed = JSON.parse(raw) as Partial<MapPrefs>
+    return {
+      ...DEFAULT_PREFS,
+      ...parsed,
+      overlays: { ...DEFAULT_PREFS.overlays, ...(parsed.overlays ?? {}) },
+    }
+  } catch {
+    // Corrupt or unavailable storage must never stop the app booting
+    return DEFAULT_PREFS
+  }
+}
+
+function savePrefs(prefs: Partial<MapPrefs>) {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ ...loadPrefs(), ...prefs }))
+  } catch {
+    /* private browsing, quota — not worth surfacing */
+  }
+}
+
+const PREFS = loadPrefs()
 
 interface AppState {
   // AOI drawn by the user on the map (GeoJSON Feature with Polygon geometry)
@@ -74,6 +135,30 @@ interface AppState {
   // How the results grid is shaded: relative to this AOI, or absolute score
   shadingMode: ShadingMode
   setShadingMode: (mode: ShadingMode) => void
+
+  // ---- Map layers (persisted to localStorage) ------------------------------
+  basemap: string
+  setBasemap: (id: string) => void
+
+  /** Multiplies the results fill opacity. Fading results in and out over fixed
+   *  terrain is the single most useful interaction for judging whether a score
+   *  makes geological sense. */
+  resultsOpacity: number
+  setResultsOpacity: (v: number) => void
+  resultsVisible: boolean
+  setResultsVisible: (v: boolean) => void
+
+  overlays: Record<OverlayId, boolean>
+  toggleOverlay: (id: OverlayId, on?: boolean) => void
+
+  /** Which reference layers this backend actually has built on disk. */
+  availableLayers: Record<string, boolean> | null
+  setAvailableLayers: (v: Record<string, boolean> | null) => void
+
+  /** Last map view, restored on reload so every refresh doesn't dump you back
+   *  to a statewide default. */
+  mapView: MapView | null
+  setMapView: (v: MapView) => void
 
   // History of completed runs (in-memory). Old polygons can be re-viewed
   // and deleted after inspecting their data.
@@ -168,6 +253,44 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   shadingMode: 'relative',
   setShadingMode: (shadingMode) => set({ shadingMode }),
+
+  basemap: PREFS.basemap,
+  setBasemap: (basemap) => {
+    savePrefs({ basemap })
+    set({ basemap })
+  },
+
+  resultsOpacity: PREFS.resultsOpacity,
+  setResultsOpacity: (resultsOpacity) => {
+    savePrefs({ resultsOpacity })
+    set({ resultsOpacity })
+  },
+
+  resultsVisible: PREFS.resultsVisible,
+  setResultsVisible: (resultsVisible) => {
+    savePrefs({ resultsVisible })
+    set({ resultsVisible })
+  },
+
+  overlays: PREFS.overlays,
+  toggleOverlay: (id, on) =>
+    set((state) => {
+      const overlays = { ...state.overlays, [id]: on ?? !state.overlays[id] }
+      savePrefs({ overlays })
+      return { overlays }
+    }),
+
+  availableLayers: null,
+  setAvailableLayers: (availableLayers) => set({ availableLayers }),
+
+  mapView: PREFS.mapView,
+  setMapView: (mapView) => {
+    savePrefs({ mapView })
+    // Deliberately not in React state: this fires on every moveend and would
+    // re-render the whole tree. The store value exists only to be read once at
+    // init and written to localStorage.
+    PREFS.mapView = mapView
+  },
 
   runs: [],
   activeRunId: null,

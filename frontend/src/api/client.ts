@@ -6,6 +6,9 @@ import type { AnalysisJob, Channel, SSEEvent } from '../types'
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? ''
 
+/** Route prefix for the map's direct fetches (reference overlays, cached coverage). */
+export const API_BASE = `${BASE_URL}/api/v1`
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
@@ -19,6 +22,25 @@ async function request<T>(
     throw new Error(`API error ${res.status}: ${text}`)
   }
   return res.json() as Promise<T>
+}
+
+// ---------------------------------------------------------------------------
+// Reference overlays and cached coverage
+//
+// These read files on disk (a GeoJSON extract, the GNIS TSV, the SQLite cache)
+// rather than Postgres, so unlike /channels and /features they work under
+// DEV_MODE=true.
+// ---------------------------------------------------------------------------
+
+export const referenceApi = {
+  /** Which reference layers this install actually has built. */
+  layers: () =>
+    request<Record<string, boolean>>('/api/v1/reference/layers'),
+
+  cacheStats: () =>
+    request<{ available: boolean; rows?: number; cells?: number }>(
+      '/api/v1/cache/stats'
+    ),
 }
 
 // ---------------------------------------------------------------------------
