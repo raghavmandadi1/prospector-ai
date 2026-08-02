@@ -14,11 +14,19 @@ in place so the layout matches what the connectors expect.
 ```
 data/
 ├── README.md                           ← this file (committed)
+├── literature/                         ← gitignored — scanned reports (see below)
 └── raw/                                ← gitignored
     ├── ger_portal_mines_minerals/      ← WA DNR / WGS Mines & Minerals
     ├── ger_portal_surface_geology_24k/ ← WA DNR / WGS Surface Geology 1:24k
     └── of00-495/                       ← USGS OFR 00-495 (NE Washington geology)
 ```
+
+> **Status note:** none of the datasets below are wired into the application. The
+> connectors under `backend/app/connectors/` all fetch from live web APIs; there
+> is currently **no loader that reads `data/raw/`** (only the offline conversion
+> step `scripts/convert_of00_495.sh`). These files were downloaded
+> ahead of the ingestion work described in `docs/04_usgs_of00_495_dataset.md`
+> and `docs/06_data_sourcing_checklist.md`.
 
 ## Datasets
 
@@ -64,24 +72,47 @@ Analysis in Northeast Washington*. Boleneus & Causey, 2000. Covers
 
 - Source: USGS — https://geopubs.wr.usgs.gov/open-file/of00-495 (also available
   via FTP at `geopubs.wr.usgs.gov:/pub/open-file/of00495`)
-- Approx size: 320 MB
+- Approx size: 314 MB
 - Format: ArcInfo Interchange (`.e00`) raster grids — `newageol.e00` (geologic
   units), `newafold.e00` (folds), `newafaul.e00` (faults), `newadike.e00`
   (dikes); plus `of00-495.pdf` (report text), `of00-495.met` (metadata),
   appendix text, and JPEG figures.
 - Background: see `docs/04_usgs_of00_495_dataset.md`.
 
+## Source literature archive (`data/literature/`)
+
+Separate from the GIS datasets above, a ~177 MB archive of scanned published
+reports backs the district-level knowledge in
+`backend/app/agents/knowledge/historical/gold.md` and the per-source analyses in
+`docs/intake_analyses/`. It ships as `FOR GITHUB-<timestamp>.zip` and is
+**gitignored** — unzip it to `data/literature/` if you need the primary sources.
+
+Contents, by folder:
+
+| Folder | Documents |
+|---|---|
+| `I90Hiker/` | USGS MF-1380-E *Mines and Prospects Map of the Glacier Peak Roadless Area* (2 sheets); *Rockhound's Guide to Washington* Vols. 1 and 3; WA DGER Bulletin 36 (Sultan district); Survey No. 7, *Geology and Ore Deposits of the Index Mining District*; Information Circular 40 |
+| `Mining in the Pacific Northwest LK Hodges/` | Hodges, *Mining in the Pacific Northwest*, pp. 1–100 and 201–316 |
+| `Reports/` | WA DGER Apex mine report; *Inventory of Washington Minerals* |
+| `Devils Canyon Mining/` | DMEA file 3557 |
+| `USGS NE WA prospectivity model/` | USGS assessment methodology (also tracked at `docs/USGS_assessment_methodology.pdf`) |
+| root | North Fork hand-drawn map; `CURRENT links.docx`, `similar models.docx`, `sources to do.docx` |
+
+The committed markdown under `docs/intake_analyses/` is the derived, machine-
+readable extract of these PDFs and is what agents and knowledge files should
+cite. Regenerate it with `scripts/extract_pdfs.py` (see `--help`).
+
 ## Re-downloading
 
 If `data/raw/` is missing or empty after cloning, fetch each dataset from the
-links above and unzip into the matching subdirectory. The connectors under
-`backend/app/connectors/` read these files by relative path; they will fail
-fast with a clear error message if a dataset is missing.
+links above and unzip into the matching subdirectory. No application code reads
+these paths, so a missing `data/raw/` will not break the backend — it only blocks
+`scripts/convert_of00_495.sh` and the offline-ingestion work still to be written.
 
 ## Why these aren't in git
 
-- Total size is ~615 MB across the three datasets; one `.e00` file alone is
-  149 MB, exceeding GitHub's 100 MB hard limit.
+- Total size is ~608 MB across the three datasets (77 + 218 + 314); one `.e00`
+  file alone is 149 MB, exceeding GitHub's 100 MB hard limit.
 - The data is redistributable from the original publishers (WA DNR and USGS)
   and is more reliably sourced from there.
 - We only need to track our derived / normalized outputs, not the upstream

@@ -57,6 +57,16 @@ data/raw/
 # but keep the README and any human-curated docs we put in data/
 !data/README.md
 
+# Source literature — scanned PDFs / archives of published reports.
+# Not committed: ~177 MB, redistributable from the original publishers, and
+# only the derived markdown in docs/intake_analyses/ is source-of-truth.
+# See "Source literature archive" in data/README.md.
+FOR GITHUB*.zip
+data/literature/
+# docs/USGS_assessment_methodology.pdf is deliberately tracked (1 MB, cited by
+# docs/04 and the intake analyses). Any other large PDF belongs in
+# data/literature/, not in git.
+
 # ArcGIS / ESRI scratch + lock files
 *.sr.lock
 *.gdb.lock
