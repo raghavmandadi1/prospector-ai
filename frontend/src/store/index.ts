@@ -1,8 +1,22 @@
 import { create } from 'zustand'
-import type { AnalysisJob, AnalysisRun, ScoredCell } from '../types'
+import type { AnalysisJob, AnalysisRun, LogEntry, RunUsage, ScoredCell } from '../types'
 
 type ActiveView = 'analysis' | 'channels' | 'results'
 type ShadingMode = 'relative' | 'absolute'
+type AgentPhase = 'pending' | 'running' | 'done' | 'failed'
+export type RunStatus = 'idle' | 'running' | 'completed' | 'failed' | 'stopped'
+
+// Cap on retained log lines. A 150-cell run across 6 agents produces a few
+// hundred entries; 2000 leaves headroom without letting a pathological run
+// grow the store without bound.
+const MAX_LOG_ENTRIES = 2000
+
+const EMPTY_USAGE: RunUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  llmCalls: 0,
+  estCostUsd: 0,
+}
 
 interface AppState {
   // AOI drawn by the user on the map (GeoJSON Feature with Polygon geometry)
@@ -68,9 +82,37 @@ interface AppState {
   addRun: (run: AnalysisRun) => void
   activateRun: (id: string) => void
   deleteRun: (id: string) => void
+
+  // ---- Live run telemetry (in-memory, cleared on reload) -------------------
+  // Lives in the store rather than AnalysisPanel local state so the log
+  // survives sidebar tab switches and can be rendered outside the sidebar.
+  runStatus: RunStatus
+  runStartedAt: number | null
+  runLog: LogEntry[]
+  runUsage: RunUsage
+  agentPhase: Record<string, AgentPhase>
+  /** agent_id → knowledge file, or null when it ran ungrounded */
+  agentGrounding: Record<string, string | null>
+  logOpen: boolean
+
+  /** AbortController for the in-flight run. Non-serializable by design —
+   *  the store never persists, so there is nothing to serialize it into. */
+  runAbort: AbortController | null
+
+  startRun: (controller: AbortController, agentIds: string[]) => void
+  appendLog: (entry: Omit<LogEntry, 'id' | 't'>) => void
+  addUsage: (delta: Partial<RunUsage>) => void
+  setAgentPhase: (agentId: string, phase: AgentPhase) => void
+  setAgentGrounding: (agentId: string, file: string | null) => void
+  finishRun: (status: Exclude<RunStatus, 'idle' | 'running'>) => void
+  stopRun: () => void
+  setLogOpen: (open: boolean) => void
+  clearLog: () => void
 }
 
-export const useAppStore = create<AppState>((set) => ({
+let logSeq = 0
+
+export const useAppStore = create<AppState>((set, get) => ({
   aoi: null,
   setAoi: (aoi) => set({ aoi }),
 
@@ -165,4 +207,78 @@ export const useAppStore = create<AppState>((set) => ({
       }
       return { runs }
     }),
+
+  // ---- Live run telemetry ---------------------------------------------------
+
+  runStatus: 'idle',
+  runStartedAt: null,
+  runLog: [],
+  runUsage: EMPTY_USAGE,
+  agentPhase: {},
+  agentGrounding: {},
+  logOpen: false,
+  runAbort: null,
+
+  startRun: (controller, agentIds) => {
+    logSeq = 0
+    set({
+      runStatus: 'running',
+      runStartedAt: Date.now(),
+      runLog: [],
+      runUsage: EMPTY_USAGE,
+      agentPhase: Object.fromEntries(agentIds.map((id) => [id, 'pending' as AgentPhase])),
+      agentGrounding: {},
+      runAbort: controller,
+      logOpen: true,
+    })
+  },
+
+  appendLog: (entry) =>
+    set((state) => {
+      const t = state.runStartedAt ? Date.now() - state.runStartedAt : 0
+      const next = [...state.runLog, { ...entry, id: logSeq++, t }]
+      return {
+        runLog: next.length > MAX_LOG_ENTRIES ? next.slice(-MAX_LOG_ENTRIES) : next,
+      }
+    }),
+
+  addUsage: (delta) =>
+    set((state) => ({
+      runUsage: {
+        inputTokens: state.runUsage.inputTokens + (delta.inputTokens ?? 0),
+        outputTokens: state.runUsage.outputTokens + (delta.outputTokens ?? 0),
+        llmCalls: state.runUsage.llmCalls + (delta.llmCalls ?? 0),
+        estCostUsd: state.runUsage.estCostUsd + (delta.estCostUsd ?? 0),
+      },
+    })),
+
+  setAgentPhase: (agentId, phase) =>
+    set((state) => ({ agentPhase: { ...state.agentPhase, [agentId]: phase } })),
+
+  setAgentGrounding: (agentId, file) =>
+    set((state) => ({ agentGrounding: { ...state.agentGrounding, [agentId]: file } })),
+
+  finishRun: (status) =>
+    set((state) => ({
+      runStatus: status,
+      runAbort: null,
+      // Any agent still marked running when the run ends never reported back
+      agentPhase: Object.fromEntries(
+        Object.entries(state.agentPhase).map(([id, p]) => [
+          id,
+          p === 'running' || p === 'pending' ? (status === 'completed' ? p : 'failed') : p,
+        ])
+      ) as Record<string, AgentPhase>,
+    })),
+
+  stopRun: () => {
+    const { runAbort, runStatus } = get()
+    if (runStatus !== 'running') return
+    runAbort?.abort()
+    set({ runStatus: 'stopped', runAbort: null })
+  },
+
+  setLogOpen: (logOpen) => set({ logOpen }),
+
+  clearLog: () => set({ runLog: [], runUsage: EMPTY_USAGE, runStatus: 'idle' }),
 }))

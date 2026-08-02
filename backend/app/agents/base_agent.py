@@ -18,14 +18,15 @@ import asyncio
 import json
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import anthropic
 
 from app.config import settings
-from app.models.agent_result import AgentResult, ScoredCell
+from app.models.agent_result import AgentResult, AgentUsage, ScoredCell
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,46 @@ BATCH_SIZE = 50
 
 # Max concurrent LLM calls per agent (6 agents run in parallel on top of this)
 MAX_CONCURRENT_BATCHES = 4
+
+# Model used by every agent. Was inlined in call_llm(); hoisted so the usage
+# ledger can report which model the numbers belong to.
+MODEL_NAME = "claude-sonnet-4-6"
+
+# USD per million tokens. This is a LOCAL ESTIMATE for the run-log ledger,
+# not billing data — update when Anthropic pricing changes.
+MODEL_PRICING = {
+    "claude-sonnet-4-6": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_read": 0.30,
+        "cache_write": 3.75,
+    },
+}
+
+# Chars of raw LLM response kept per batch for the UI run log. Enough to see
+# whether the model returned JSON or started apologizing, small enough that
+# 150 cells of telemetry doesn't bloat the SSE stream.
+RESPONSE_PREVIEW_CHARS = 400
+
+
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate USD cost for one or more LLM calls. Unknown models cost 0."""
+    price = MODEL_PRICING.get(model)
+    if not price:
+        return 0.0
+    return round(
+        (input_tokens * price["input"]
+         + output_tokens * price["output"]
+         + cache_read_tokens * price["cache_read"]
+         + cache_creation_tokens * price["cache_write"]) / 1_000_000,
+        6,
+    )
 
 
 def cell_summary(cells: List[Dict]) -> str:
@@ -108,6 +149,7 @@ class BaseAgent(ABC):
         target_mineral: str,
         spatial_context: Dict[str, Any],
         config: Dict[str, Any],
+        emit_fn: Optional[Callable] = None,
     ) -> AgentResult:
         """
         Main entry point called by the orchestrator.
@@ -116,20 +158,36 @@ class BaseAgent(ABC):
         with its own LLM call (bounded concurrency), merges the results, and
         fills any unscored cells with zero-confidence placeholders so the
         scoring engine can ignore them without losing grid coverage.
+
+        emit_fn is an optional async telemetry callback (agent_id, payload
+        dict). It is best-effort: a failing emitter must never take down a
+        run, so every call goes through _emit().
         """
         grid_cells = spatial_context.get("grid_cells", [])
         warnings: List[str] = []
+        usage = AgentUsage()
+        started_at = time.monotonic()
         try:
-            knowledge = self.load_knowledge(
-                self.knowledge_domain or self.agent_id, target_mineral
-            )
+            domain = self.knowledge_domain or self.agent_id
+            knowledge_path = self.resolve_knowledge_path(domain, target_mineral)
+            knowledge = self.load_knowledge(domain, target_mineral)
+
+            await self._emit(emit_fn, {
+                "event": "agent_grounding",
+                "agent_id": self.agent_id,
+                "knowledge_file": (
+                    f"{domain}/{knowledge_path.name}" if knowledge_path else None
+                ),
+                "knowledge_chars": len(knowledge) if knowledge else 0,
+            })
+
             batches = [
                 grid_cells[i : i + BATCH_SIZE]
                 for i in range(0, len(grid_cells), BATCH_SIZE)
             ]
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
 
-            async def score_batch(batch: List[Dict]) -> tuple:
+            async def score_batch(index: int, batch: List[Dict]) -> tuple:
                 async with semaphore:
                     ctx = dict(spatial_context)
                     ctx["grid_cells"] = batch
@@ -138,11 +196,46 @@ class BaseAgent(ABC):
                         f"[{self.agent_id}] Scoring batch of {len(batch)} cells "
                         f"(prompt {len(prompt)} chars)"
                     )
-                    response = await self.call_llm(prompt, system_prompt=knowledge)
-                    return response, self.parse_llm_response(response, batch)
+                    await self._emit(emit_fn, {
+                        "event": "batch_started",
+                        "agent_id": self.agent_id,
+                        "batch_index": index,
+                        "batch_count": len(batches),
+                        "cell_count": len(batch),
+                        "prompt_chars": len(prompt),
+                    })
+                    t0 = time.monotonic()
+                    response, call_usage = await self.call_llm_with_usage(
+                        prompt, system_prompt=knowledge
+                    )
+                    cells = self.parse_llm_response(response, batch)
+                    # parse_llm_response drops cells it could not map, so the
+                    # scored/requested ratio is the parse-health signal. It is
+                    # derived from counts rather than parser state so it stays
+                    # correct with MAX_CONCURRENT_BATCHES calls in flight.
+                    if not cells:
+                        parse_status = "failed"
+                    elif len(cells) < len(batch):
+                        parse_status = "partial"
+                    else:
+                        parse_status = "ok"
+                    await self._emit(emit_fn, {
+                        "event": "batch_complete",
+                        "agent_id": self.agent_id,
+                        "batch_index": index,
+                        "duration_ms": int((time.monotonic() - t0) * 1000),
+                        "cells_scored": len(cells),
+                        "cells_requested": len(batch),
+                        "parse_status": parse_status,
+                        "response_chars": len(response or ""),
+                        "response_preview": (response or "")[:RESPONSE_PREVIEW_CHARS],
+                        **call_usage,
+                    })
+                    return response, cells, call_usage
 
             results = await asyncio.gather(
-                *(score_batch(b) for b in batches), return_exceptions=True
+                *(score_batch(i, b) for i, b in enumerate(batches)),
+                return_exceptions=True,
             )
 
             scored: List[ScoredCell] = []
@@ -151,8 +244,19 @@ class BaseAgent(ABC):
                 if isinstance(res, BaseException):
                     logger.error(f"[{self.agent_id}] Batch {i} failed: {res}")
                     warnings.append(f"Batch {i} failed: {res}")
+                    await self._emit(emit_fn, {
+                        "event": "batch_failed",
+                        "agent_id": self.agent_id,
+                        "batch_index": i,
+                        "error": f"{type(res).__name__}: {res}",
+                    })
                     continue
-                response, cells = res
+                response, cells, call_usage = res
+                usage.llm_calls += 1
+                usage.input_tokens += call_usage.get("input_tokens", 0)
+                usage.output_tokens += call_usage.get("output_tokens", 0)
+                usage.cache_read_tokens += call_usage.get("cache_read_tokens", 0)
+                usage.cache_creation_tokens += call_usage.get("cache_creation_tokens", 0)
                 if agent_notes is None and response:
                     agent_notes = response[:1000]
                 scored.extend(cells)
@@ -178,6 +282,15 @@ class BaseAgent(ABC):
                     f"(zero-confidence placeholders inserted)"
                 )
 
+            usage.duration_ms = int((time.monotonic() - started_at) * 1000)
+            usage.est_cost_usd = estimate_cost_usd(
+                MODEL_NAME,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+            )
+
             status = "completed" if len(scored_ids) > 0 else "failed"
             return AgentResult(
                 agent_id=self.agent_id,
@@ -185,14 +298,42 @@ class BaseAgent(ABC):
                 scored_cells=scored,
                 agent_notes=agent_notes,
                 warnings=warnings,
+                usage=usage,
+                knowledge_file=(
+                    f"{domain}/{knowledge_path.name}" if knowledge_path else None
+                ),
             )
+        except asyncio.CancelledError:
+            # Raised when the client stops the run. Must propagate: swallowing
+            # it here would let the orchestrator's gather() carry on and keep
+            # spending tokens on the remaining agents.
+            logger.info(f"[{self.agent_id}] Cancelled after {usage.llm_calls} LLM calls")
+            raise
         except Exception as exc:
             logger.exception(f"Agent {self.agent_id} failed: {exc}")
+            usage.duration_ms = int((time.monotonic() - started_at) * 1000)
             return AgentResult(
                 agent_id=self.agent_id,
                 status="failed",
                 warnings=[str(exc)],
+                usage=usage,
             )
+
+    @staticmethod
+    async def _emit(emit_fn: Optional[Callable], payload: Dict[str, Any]) -> None:
+        """Best-effort telemetry emit. Never raises, never cancels a run.
+
+        CancelledError is deliberately re-raised — it is not a telemetry
+        failure, it is the stop signal passing through.
+        """
+        if emit_fn is None:
+            return
+        try:
+            await emit_fn(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - telemetry must not break runs
+            logger.warning(f"Telemetry emit failed: {exc}")
 
     @abstractmethod
     def build_prompt(
@@ -210,6 +351,22 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
+    def resolve_knowledge_path(
+        self, domain: str, target_mineral: str
+    ) -> Optional[Path]:
+        """
+        Resolve which knowledge file load_knowledge() would use, without
+        reading it. Returns None when the agent will run ungrounded.
+
+        Split out from load_knowledge so telemetry can report the filename
+        without changing that method's documented signature.
+        """
+        mineral_key = target_mineral.lower().replace(" ", "_")
+        knowledge_file = KNOWLEDGE_DIR / domain / f"{mineral_key}.md"
+        if not knowledge_file.exists():
+            knowledge_file = KNOWLEDGE_DIR / domain / "default.md"
+        return knowledge_file if knowledge_file.exists() else None
+
     def load_knowledge(self, domain: str, target_mineral: str) -> Optional[str]:
         """
         Load a domain knowledge markdown file for the given mineral.
@@ -218,13 +375,12 @@ class BaseAgent(ABC):
         Falls back to: knowledge/<domain>/default.md
         Returns None if no knowledge file exists.
         """
-        mineral_key = target_mineral.lower().replace(" ", "_")
-        knowledge_file = KNOWLEDGE_DIR / domain / f"{mineral_key}.md"
-        if not knowledge_file.exists():
-            knowledge_file = KNOWLEDGE_DIR / domain / "default.md"
-        if not knowledge_file.exists():
-            logger.info(
-                f"[{self.agent_id}] No knowledge file for {domain}/{mineral_key}"
+        knowledge_file = self.resolve_knowledge_path(domain, target_mineral)
+        if knowledge_file is None:
+            mineral_key = target_mineral.lower().replace(" ", "_")
+            logger.warning(
+                f"[{self.agent_id}] No knowledge file for {domain}/{mineral_key} "
+                f"— running with system=None (ungrounded)"
             )
             return None
         content = knowledge_file.read_text(encoding="utf-8")
@@ -233,6 +389,44 @@ class BaseAgent(ABC):
             f"({len(content)} chars)"
         )
         return content
+
+    async def call_llm_with_usage(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> Tuple[str, Dict[str, int]]:
+        """
+        Call the Anthropic API and return (text, usage_dict).
+
+        The usage block is the only place per-call token counts exist — the
+        Messages API does not expose them anywhere else, so discarding the
+        response object (as call_llm does) loses them permanently.
+        """
+        kwargs = {
+            "model": MODEL_NAME,
+            "max_tokens": self.max_output_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        message = await self._client.messages.create(**kwargs)
+
+        u = getattr(message, "usage", None)
+        usage = {
+            "input_tokens": getattr(u, "input_tokens", 0) or 0,
+            "output_tokens": getattr(u, "output_tokens", 0) or 0,
+            "cache_read_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
+            "cache_creation_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+            "stop_reason": getattr(message, "stop_reason", None),
+            "model": MODEL_NAME,
+        }
+        # max_tokens truncation is the documented root cause of the all-zero
+        # scores bug. Worth flagging loudly rather than leaving it to the
+        # JSON repair path to quietly paper over.
+        if usage["stop_reason"] == "max_tokens":
+            logger.warning(
+                f"[{self.agent_id}] Response hit max_tokens "
+                f"({self.max_output_tokens}) — JSON likely truncated"
+            )
+        return message.content[0].text, usage
 
     async def call_llm(
         self, prompt: str, system_prompt: Optional[str] = None
@@ -243,16 +437,11 @@ class BaseAgent(ABC):
 
         If system_prompt is provided, it is sent as the system message,
         which is the recommended place for domain knowledge context.
+
+        Thin wrapper over call_llm_with_usage that drops the token counts.
         """
-        kwargs = {
-            "model": "claude-sonnet-4-6",
-            "max_tokens": self.max_output_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if system_prompt:
-            kwargs["system"] = system_prompt
-        message = await self._client.messages.create(**kwargs)
-        return message.content[0].text
+        text, _ = await self.call_llm_with_usage(prompt, system_prompt)
+        return text
 
     def parse_llm_response(
         self, response: str, grid_cells: List[Dict[str, Any]]

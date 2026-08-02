@@ -74,11 +74,23 @@ forces it, so **this is the path you are almost certainly on.**
 Combined with (1): on a default dev run, no agent sees database evidence and four of six
 have no domain grounding either.
 
-### 3. No tests
+### 3. Almost no tests
 
-Zero. No pytest, conftest, vitest, or CI. `npm run lint` is defined in `package.json` but
-eslint is neither installed nor configured, so it fails. Scoring math in `engine.py` and
-`grid.py` is unverified by anything but inspection.
+Two standalone smoke scripts in `backend/tests/`, run by hand (`python3
+backend/tests/test_run_telemetry.py`). No pytest, conftest, vitest, or CI. They cover the
+run-telemetry and cancellation paths only:
+
+- `test_run_telemetry.py` — stubs `anthropic.AsyncAnthropic`, runs a full job through a
+  live uvicorn, and asserts the token ledger sums correctly, that a `max_tokens` stop
+  reason is reported as a partial parse, and that ungrounded agents are identified.
+- `test_run_cancellation.py` — holds fake LLM calls open, closes the HTTP stream mid-run,
+  and asserts no call completes or starts afterwards.
+
+Both also assert live that spatial context is dead (Known Gap #2) and that `structure` runs
+ungrounded (Known Gap #1) — they will start failing when those are fixed, which is the point.
+
+**Still unverified: scoring math.** `engine.py` and `grid.py` have no coverage at all.
+`npm run lint` still fails (eslint neither installed nor configured); use `npm run typecheck`.
 
 ### 4. Stubs and unused infrastructure
 
@@ -142,6 +154,36 @@ Phase 3 — Multi-Agent Analysis
 | Persistence | none — results live in the browser only | `analysis_jobs` table |
 | `/channels`, `/features` | **404** — ChannelDashboard tab is broken | working |
 | Spatial context | fails, agents get empty context (Known Gaps #2) | works if the DB is populated |
+| Stop / cancel | working — client aborts the fetch, generator polls `is_disconnected()`, task is cancelled | **not wired** — no cancel endpoint for the Celery path |
+
+### SSE event contract
+
+Both paths emit the same JSON payloads (`{"event": "<name>", ...}`); dev sends them on the
+POST response, prod over Redis pub/sub. The frontend maps every one of these to a run-log
+line in `hooks/useAnalysisRunner.ts` — add a case there when adding an event, or it lands
+in the `default` branch as "Unhandled event".
+
+| Event | Emitted by | Carries |
+|---|---|---|
+| `started` | orchestrator | `job_id` |
+| `grid_info` | orchestrator | display/analysis resolution, cell count (only when coarsened) |
+| `spatial_context` | orchestrator | per-domain record `counts`, plus `error` when the PostGIS query failed |
+| `agent_started` | orchestrator | `agent_id` |
+| `agent_grounding` | **agent** | `knowledge_file` (null ⇒ ran with `system=None`), `knowledge_chars` |
+| `batch_started` | **agent** | batch index/count, cell count, prompt chars |
+| `batch_complete` | **agent** | tokens in/out, `duration_ms`, `cells_scored`/`cells_requested`, `parse_status`, `stop_reason`, response preview |
+| `batch_failed` | **agent** | batch index, error string |
+| `agent_complete` | orchestrator | status, cells scored, `knowledge_file`, `warnings`, `usage` |
+| `usage` | orchestrator | job token totals, `est_cost_usd`, `by_agent`, `ungrounded_agents` |
+| `results` | `analysis_dev.py` | `final_scores`, `agent_results` (dev path only) |
+| `job_complete` / `error` | orchestrator | terminal |
+
+Telemetry is best-effort: `BaseAgent._emit()` swallows emitter exceptions so a broken
+stream can never fail a run. It re-raises `CancelledError` — that is the stop signal, not
+a telemetry failure.
+
+**Cost figures are local estimates**, computed from `MODEL_PRICING` in `base_agent.py`.
+That table is hardcoded and will drift; it is not billing data.
 
 Phase 1 (ingestion) is therefore unreachable in dev mode. The frontend only ever calls the
 dev path: `AnalysisPanel` uses `runAnalysisDev`, and `analysisApi.createJob` /
@@ -213,16 +255,22 @@ prospector-ai/
 │       │   └── agent_result.py      ← AgentResult + ScoredCell Pydantic models
 │       ├── db/session.py
 │       └── config.py
-├── frontend/                        ← 11 source files, ~1,700 lines total
+├── backend/tests/                   ← hand-run smoke scripts, no pytest (see Known Gaps #3)
+│   ├── test_run_telemetry.py        ← full run: token ledger, parse health, grounding rollup
+│   └── test_run_cancellation.py     ← close the stream mid-run, assert LLM calls stop
+├── frontend/
 │   └── src/
 │       ├── App.tsx                  ← flex shell; tab switcher is LOCAL state, not the store
 │       ├── main.tsx
 │       ├── components/              ← one .tsx per directory, no sub-components
 │       │   ├── Map/MapView.tsx      ← MapLibre + draw tool + the results choropleth
-│       │   ├── AnalysisPanel/       ← API key, AOI, mineral, weights, SSE progress, Past Runs
+│       │   ├── AnalysisPanel/       ← API key, AOI, mineral, weights, agent progress, Past Runs
 │       │   ├── ResultsOverlay/      ← summary bar + legend + Relative/Absolute toggle
 │       │   ├── ChannelDashboard/    ← channel list + sync (404s under DEV_MODE)
-│       │   └── EvidenceDrawer/      ← per-cell score breakdown sidebar
+│       │   ├── EvidenceDrawer/      ← per-cell score breakdown sidebar
+│       │   └── RunLog/              ← bottom console: live token ledger, event stream, Stop
+│       ├── hooks/
+│       │   └── useAnalysisRunner.ts ← owns run/stop; translates SSE events → log entries
 │       ├── store/index.ts           ← single flat Zustand store, no middleware, no persist
 │       ├── api/client.ts            ← typed API client (several exports are dead code)
 │       └── types/index.ts
@@ -263,8 +311,13 @@ prospector-ai/
 8. Write `knowledge/<domain>/<mineral>.md` — **not optional in practice.** Without it the
    agent runs with no system prompt while still contributing full weight (Known Gaps #1).
 
-Do **not** override `parse_llm_response()`. The shared implementation at `base_agent.py:257`
-handles all six agents, including the truncated-JSON repair; overriding it loses that.
+Do **not** override `parse_llm_response()`. The shared implementation handles all six
+agents, including the truncated-JSON repair; overriding it loses that.
+
+`BaseAgent.run()` takes an optional `emit_fn` and emits `agent_grounding`, `batch_started`,
+`batch_complete`, and `batch_failed` for you — a new agent gets run-log telemetry for free
+as long as it does not override `run()`. If you need token counts inside a subclass, call
+`call_llm_with_usage()`; `call_llm()` is a wrapper that discards them.
 
 Use `/new-agent` command to scaffold the boilerplate.
 
@@ -589,7 +642,8 @@ Track progress in `docs/03_implementation_plan.md`.
       inspection, but there is **not one test in the repo**. This stays unchecked until there is.
 - [x] **M5: First end-to-end analysis** — full job runs draw → agents → synthesis → grid
 - [x] **M6: Full UI** — draw → run → results → evidence drawer, plus Relative/Absolute
-      toggle and Past Runs
+      toggle, Past Runs, and the RunLog console (live token/cost ledger, per-batch event
+      stream, grounding readout, Stop)
 - [ ] **M7: Production-ready MVP** — no export endpoint, no tests, no CI, no working lint;
       four agents ungrounded and spatial context dead in dev (Known Gaps #1, #2)
 

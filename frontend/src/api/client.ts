@@ -107,6 +107,14 @@ export const analysisApi = {
  * Run analysis in dev mode. The POST response itself is an SSE stream.
  * No separate job ID or EventSource subscription needed.
  */
+/** Thrown-error shape for a run the user stopped, so callers can tell an
+ *  intentional stop apart from a dropped connection. */
+export function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof DOMException && err.name === 'AbortError'
+  ) || (err instanceof Error && err.name === 'AbortError')
+}
+
 export async function runAnalysisDev(
   body: {
     aoi_geojson: GeoJSON.FeatureCollection
@@ -119,12 +127,16 @@ export async function runAnalysisDev(
     anthropic_api_key: string
   },
   onEvent: (event: SSEEvent & { final_scores?: unknown; agent_results?: unknown }) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  /** Abort to stop the run. Closing the response body is what the backend
+   *  watches for; it cancels the orchestrator task on its next poll. */
+  signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch(`${BASE_URL}/api/v1/analysis/jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
 
   if (!res.ok) {
@@ -134,6 +146,11 @@ export async function runAnalysisDev(
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('No response body')
+
+  // fetch's own abort handling does not always reject a read() already in
+  // flight, so cancel the reader explicitly to unblock the loop immediately.
+  const onAbort = () => { void reader.cancel().catch(() => {}) }
+  signal?.addEventListener('abort', onAbort, { once: true })
 
   const decoder = new TextDecoder()
   let buffer = ''
@@ -151,6 +168,8 @@ export async function runAnalysisDev(
 
       for (const line of lines) {
         const trimmed = line.trim()
+        // ": keepalive" comment frames are heartbeats — ignored here, but
+        // they are what makes the server notice a dead socket.
         if (trimmed.startsWith('data: ')) {
           try {
             const parsed = JSON.parse(trimmed.slice(6))
@@ -162,7 +181,12 @@ export async function runAnalysisDev(
       }
     }
   } catch (err) {
+    // A stopped run is not an error — swallow it and let the caller's abort
+    // handler own the UI state.
+    if (isAbortError(err) || signal?.aborted) return
     if (onError) onError(err instanceof Error ? err : new Error(String(err)))
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
   }
 }
 

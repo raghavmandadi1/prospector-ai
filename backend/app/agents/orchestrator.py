@@ -130,6 +130,19 @@ class OrchestratorAgent:
             # 2. Build spatial context for each agent domain (PostGIS queries)
             spatial_context = await self._build_spatial_context(aoi_geojson, grid_cells)
 
+            # Report what the agents will actually see. This query fails
+            # silently in DEV_MODE (no asyncpg), and a run where every count
+            # is zero is a run scored entirely from LLM regional priors.
+            await emit_fn({
+                "event": "spatial_context",
+                "error": spatial_context.get("_error"),
+                "counts": {
+                    k: len(v)
+                    for k, v in spatial_context.items()
+                    if k != "grid_cells" and isinstance(v, list)
+                },
+            })
+
             # 3. Fan out to enabled agents in parallel
             enabled_agents = config.get("enabled_agents", None)
             agents = self._build_agents(enabled_agents)
@@ -142,6 +155,17 @@ class OrchestratorAgent:
 
             agent_results: List[AgentResult] = await asyncio.gather(*agent_tasks)
             logger.info(f"[{job_id}] All agents completed")
+
+            # Job-level token/cost rollup. Emitted before synthesis so the UI
+            # ledger settles while the (potentially slow) scoring runs.
+            usage_totals = self._roll_up_usage(agent_results)
+            logger.info(
+                f"[{job_id}] Usage: {usage_totals['input_tokens']} in / "
+                f"{usage_totals['output_tokens']} out over "
+                f"{usage_totals['llm_calls']} calls "
+                f"(~${usage_totals['est_cost_usd']:.4f})"
+            )
+            await emit_fn({"event": "usage", "job_id": job_id, **usage_totals})
 
             # 4. Synthesize scores on the analysis grid
             weights = config.get("weights", DEFAULT_WEIGHTS.get(target_mineral, {}))
@@ -178,10 +202,43 @@ class OrchestratorAgent:
 
             return final_scores, agent_results_dict
 
+        except asyncio.CancelledError:
+            # User stopped the run. Do not emit — the client that would have
+            # received the event is the one that just disconnected.
+            logger.info(f"[{job_id}] Analysis cancelled")
+            raise
         except Exception as exc:
             logger.exception(f"[{job_id}] Orchestrator failed: {exc}")
             await emit_fn({"event": "error", "message": str(exc)})
             raise
+
+    @staticmethod
+    def _roll_up_usage(agent_results: List[AgentResult]) -> Dict[str, Any]:
+        """Aggregate per-agent token usage into job totals + a per-agent map."""
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "llm_calls": 0,
+            "est_cost_usd": 0.0,
+        }
+        by_agent: Dict[str, Any] = {}
+        for r in agent_results:
+            if not r.usage:
+                continue
+            u = r.usage.model_dump()
+            by_agent[r.agent_id] = u
+            for k in totals:
+                totals[k] += u.get(k, 0)
+        totals["est_cost_usd"] = round(totals["est_cost_usd"], 6)
+        totals["by_agent"] = by_agent
+        # Agents that ran with system=None contribute ungrounded scores at
+        # full weight. Surfaced here so the UI can warn before results land.
+        totals["ungrounded_agents"] = [
+            r.agent_id for r in agent_results if r.knowledge_file is None
+        ]
+        return totals
 
     async def _make_redis_emitter(self, job_id: str) -> Callable:
         """Create an emit function backed by Redis pub/sub."""
@@ -203,12 +260,27 @@ class OrchestratorAgent:
         spatial_context: Dict,
         config: Dict,
     ) -> AgentResult:
-        """Wrapper that emits SSE events before and after each agent run."""
+        """Wrapper that emits SSE events before and after each agent run.
+
+        emit_fn is threaded into agent.run() so the agent can emit its own
+        per-batch telemetry; without it the stream is silent for the whole
+        multi-minute span between agent_started and agent_complete.
+        """
         await emit_fn({"event": "agent_started", "agent_id": agent.agent_id})
-        result = await agent.run(aoi_geojson, target_mineral, spatial_context, config)
-        await emit_fn(
-            {"event": "agent_complete", "agent_id": agent.agent_id, "status": result.status}
+        result = await agent.run(
+            aoi_geojson, target_mineral, spatial_context, config, emit_fn=emit_fn
         )
+        scored = [c for c in result.scored_cells if c.confidence > 0]
+        await emit_fn({
+            "event": "agent_complete",
+            "agent_id": agent.agent_id,
+            "status": result.status,
+            "cells_scored": len(scored),
+            "cells_total": len(result.scored_cells),
+            "knowledge_file": result.knowledge_file,
+            "warnings": result.warnings,
+            "usage": result.usage.model_dump() if result.usage else None,
+        })
         return result
 
     async def _build_spatial_context(
@@ -226,6 +298,9 @@ class OrchestratorAgent:
         context: Dict[str, Any] = {
             "grid_cells": [cell.model_dump() if hasattr(cell, "model_dump") else cell.__dict__ for cell in grid_cells],
             "aoi_geojson": aoi_geojson,
+            # Set when the PostGIS query fails so the failure reaches the run
+            # log instead of only the server's stderr. Agents ignore this key.
+            "_error": None,
             "geology_units": [],
             "fault_traces": [],
             "known_deposits": [],
@@ -312,6 +387,7 @@ class OrchestratorAgent:
                 len(context["fault_traces"]),
             )
         except Exception as exc:
+            context["_error"] = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 f"Spatial context query failed ({exc}); agents will run on "
                 f"LLM regional knowledge only"

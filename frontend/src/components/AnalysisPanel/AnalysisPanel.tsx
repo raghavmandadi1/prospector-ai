@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useAppStore } from '../../store'
-import { runAnalysisDev } from '../../api/client'
-import type { AnalysisRun, ScoredCell } from '../../types'
+import { useAnalysisRunner } from '../../hooks/useAnalysisRunner'
 
 const MINERALS = ['gold', 'silver', 'copper', 'uranium', 'lithium', 'zinc', 'lead']
 const AGENTS: { id: string; label: string; description: string }[] = [
@@ -25,26 +24,34 @@ export default function AnalysisPanel() {
     agentWeights, setAgentWeights,
     enabledAgents, setEnabledAgents,
     resolutionM, setResolutionM,
-    setAnalysisResults,
-    setLastAgentResults,
     apiKey, setApiKey,
     isDrawing, setIsDrawing,
     aoiAreaKm2,
     setAoi, setAoiAreaKm2,
-    runs, activeRunId, addRun, activateRun, deleteRun,
+    runs, activeRunId, activateRun, deleteRun,
   } = useAppStore()
 
-  const [isRunning, setIsRunning] = useState(false)
-  const [progress, setProgress] = useState<Record<string, string>>({})
+  // Run state now lives in the store so RunLog (outside this subtree) can
+  // read it and so it survives a sidebar tab switch mid-run.
+  const runStatus = useAppStore((s) => s.runStatus)
+  const agentPhase = useAppStore((s) => s.agentPhase)
+  const agentGrounding = useAppStore((s) => s.agentGrounding)
+  const setLogOpen = useAppStore((s) => s.setLogOpen)
+  const { run, stop } = useAnalysisRunner()
+
   const [error, setError] = useState<string | null>(null)
-  const [completedAgents, setCompletedAgents] = useState(0)
   const [showApiKey, setShowApiKey] = useState(false)
+
+  const isRunning = runStatus === 'running'
 
   const selectedAgentIds = Object.entries(enabledAgents)
     .filter(([, enabled]) => enabled)
     .map(([id]) => id)
 
   const totalAgents = selectedAgentIds.length
+  const completedAgents = selectedAgentIds.filter(
+    (id) => agentPhase[id] === 'done' || agentPhase[id] === 'failed'
+  ).length
 
   function toggleAgent(agentId: string) {
     setEnabledAgents({ ...enabledAgents, [agentId]: !enabledAgents[agentId] })
@@ -64,75 +71,17 @@ export default function AnalysisPanel() {
       return
     }
 
-    setIsRunning(true)
     setError(null)
-    setProgress({})
-    setCompletedAgents(0)
-
-    try {
-      await runAnalysisDev(
-        {
-          aoi_geojson: {
-            type: 'FeatureCollection',
-            features: [aoi],
-          },
-          target_mineral: targetMineral,
-          config: {
-            resolution_m: resolutionM,
-            weights: agentWeights,
-            enabled_agents: selectedAgentIds,
-          },
-          anthropic_api_key: apiKey,
-        },
-        (event) => {
-          if (event.event === 'agent_started') {
-            setProgress((prev) => ({ ...prev, [event.agent_id!]: 'running' }))
-          } else if (event.event === 'agent_complete') {
-            setProgress((prev) => ({
-              ...prev,
-              [event.agent_id!]: event.status === 'completed' ? 'done' : 'failed',
-            }))
-            setCompletedAgents((n) => n + 1)
-          } else if (event.event === 'results') {
-            // Dev mode: final results come as a special "results" event
-            const scores = event.final_scores as { scored_cells: ScoredCell[] } | undefined
-            const cells = scores?.scored_cells ?? []
-            setAnalysisResults(cells)
-            // Save agent results for evidence drawer breakdown
-            const agentResults = (event.agent_results as Record<string, any>) ?? null
-            if (agentResults) {
-              setLastAgentResults(agentResults)
-            }
-            // Record in run history so the polygon can be revisited/deleted
-            if (aoi && cells.length > 0) {
-              const run: AnalysisRun = {
-                id: (crypto as any).randomUUID?.() ?? String(Date.now()),
-                createdAt: new Date().toISOString(),
-                targetMineral,
-                resolutionM,
-                aoi,
-                aoiAreaKm2: aoiAreaKm2 ?? 0,
-                results: cells,
-                agentResults,
-              }
-              addRun(run)
-            }
-          } else if (event.event === 'job_complete') {
-            setIsRunning(false)
-          } else if (event.event === 'error') {
-            setError(event.message ?? 'Analysis failed')
-            setIsRunning(false)
-          }
-        },
-        (err) => {
-          setError(err.message || 'Lost connection to analysis stream')
-          setIsRunning(false)
-        }
-      )
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start analysis')
-      setIsRunning(false)
-    }
+    await run({
+      aoi,
+      aoiAreaKm2: aoiAreaKm2 ?? 0,
+      targetMineral,
+      resolutionM,
+      weights: agentWeights,
+      agentIds: selectedAgentIds,
+      apiKey,
+      onError: setError,
+    })
   }
 
   return (
@@ -313,8 +262,10 @@ export default function AnalysisPanel() {
           </div>
           <div className="mt-2 space-y-1">
             {selectedAgentIds.map((agentId) => {
-              const state = progress[agentId]
+              const state = agentPhase[agentId]
               const agent = AGENTS.find((a) => a.id === agentId)
+              // undefined = not reported yet; null = reported as ungrounded
+              const grounding = agentGrounding[agentId]
               return (
                 <div key={agentId} className="flex items-center gap-2 text-xs">
                   <span
@@ -322,7 +273,7 @@ export default function AnalysisPanel() {
                       state === 'done'
                         ? 'bg-green-400'
                         : state === 'running'
-                        ? 'bg-blue-400 animate-pulse'
+                        ? 'bg-blue-400 animate-pulse motion-reduce:animate-none'
                         : state === 'failed'
                         ? 'bg-red-400'
                         : 'bg-gray-600'
@@ -331,6 +282,14 @@ export default function AnalysisPanel() {
                   <span className="text-gray-400">
                     {agent?.label ?? agentId}
                   </span>
+                  {grounding === null && (
+                    <span
+                      className="text-amber-300"
+                      title="No knowledge file — this agent is scoring with no system prompt, at full weight."
+                    >
+                      ungrounded
+                    </span>
+                  )}
                 </div>
               )
             })}
@@ -338,17 +297,31 @@ export default function AnalysisPanel() {
         </div>
       )}
 
-      {/* Run button */}
-      <button
-        onClick={handleRunAnalysis}
-        disabled={isRunning || !aoi || selectedAgentIds.length === 0 || !apiKey.trim()}
-        className="w-full py-2.5 px-4 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-sm font-medium transition-colors"
-      >
-        {isRunning
-          ? 'Running Analysis...'
-          : `Run Analysis (${selectedAgentIds.length} agent${selectedAgentIds.length !== 1 ? 's' : ''})`
-        }
-      </button>
+      {/* Run / Stop */}
+      {isRunning ? (
+        <div className="flex gap-2">
+          <button
+            onClick={stop}
+            className="flex-1 py-2.5 px-4 rounded bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+          >
+            Stop Run
+          </button>
+          <button
+            onClick={() => setLogOpen(true)}
+            className="px-4 py-2.5 rounded border border-gray-600 text-gray-300 hover:bg-gray-700 text-sm transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+          >
+            Log
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={handleRunAnalysis}
+          disabled={!aoi || selectedAgentIds.length === 0 || !apiKey.trim()}
+          className="w-full py-2.5 px-4 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-sm font-medium transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+        >
+          {`Run Analysis (${selectedAgentIds.length} agent${selectedAgentIds.length !== 1 ? 's' : ''})`}
+        </button>
+      )}
 
       {/* Past runs — revisit or delete old polygons */}
       {runs.length > 0 && (

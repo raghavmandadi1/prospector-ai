@@ -29,6 +29,22 @@ class ScoredCell(BaseModel):
     parent_cell_id: Optional[str] = None
 
 
+class AgentUsage(BaseModel):
+    """Token accounting for one agent run.
+
+    Populated by BaseAgent.run() from the `usage` block on every Anthropic
+    response. `est_cost_usd` is a local estimate from MODEL_PRICING in
+    base_agent.py — it is not billing data and will drift when prices change.
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    llm_calls: int = 0
+    est_cost_usd: float = 0.0
+    duration_ms: int = 0
+
+
 class AgentResult(BaseModel):
     """Output from a single specialist agent run."""
     agent_id: str
@@ -38,3 +54,9 @@ class AgentResult(BaseModel):
     agent_notes: Optional[str] = None
     # Non-fatal issues encountered during the run
     warnings: List[str] = Field(default_factory=list)
+    # Token/cost accounting for this run
+    usage: Optional[AgentUsage] = None
+    # Name of the knowledge file used as the system prompt, or None if the
+    # agent ran ungrounded (system=None). Surfaced in the UI run log — four
+    # of six agents currently have no knowledge file at all.
+    knowledge_file: Optional[str] = None

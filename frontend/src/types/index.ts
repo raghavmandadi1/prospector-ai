@@ -28,12 +28,25 @@ export interface AnalysisRun {
   agentResults: Record<string, AgentResult> | null
 }
 
+export interface AgentUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  llm_calls: number
+  est_cost_usd: number
+  duration_ms: number
+}
+
 export interface AgentResult {
   agent_id: string
   status: 'completed' | 'failed' | 'skipped'
   scored_cells: ScoredCell[]
   agent_notes?: string
   warnings: string[]
+  usage?: AgentUsage | null
+  // null means the agent ran with system=None — no domain grounding
+  knowledge_file?: string | null
 }
 
 export interface AnalysisJob {
@@ -75,6 +88,71 @@ export interface SSEEvent {
   job_id?: string
   status?: string
   message?: string
+
+  // grid_info
+  display_resolution_m?: number
+  analysis_resolution_m?: number
+  analysis_cell_count?: number
+
+  // spatial_context — `error` non-null means agents got no database evidence
+  error?: string | null
+  counts?: Record<string, number>
+
+  // agent_grounding — knowledge_file null means system=None (ungrounded)
+  knowledge_file?: string | null
+  knowledge_chars?: number
+
+  // batch_started / batch_complete / batch_failed
+  batch_index?: number
+  batch_count?: number
+  cell_count?: number
+  prompt_chars?: number
+  duration_ms?: number
+  cells_scored?: number
+  cells_requested?: number
+  parse_status?: 'ok' | 'partial' | 'failed'
+  response_chars?: number
+  response_preview?: string
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
+  stop_reason?: string | null
+  model?: string
+
+  // agent_complete
+  cells_total?: number
+  warnings?: string[]
+  usage?: AgentUsage | null
+
+  // usage (job rollup)
+  llm_calls?: number
+  est_cost_usd?: number
+  by_agent?: Record<string, AgentUsage>
+  ungrounded_agents?: string[]
+}
+
+// One line in the run log. Severity drives the marker glyph, not a colored
+// stripe — `warn` is the interesting one (ungrounded agent, partial parse,
+// truncated response) and must stay scannable in a fast-scrolling stream.
+export interface LogEntry {
+  id: number
+  /** ms since the run started */
+  t: number
+  level: 'info' | 'warn' | 'error' | 'success'
+  agentId?: string
+  message: string
+  /** right-aligned numeric column, e.g. "12.4k → 3.1k tok" */
+  metric?: string
+  /** revealed on click — raw response preview, stack, warning list */
+  detail?: string
+}
+
+export interface RunUsage {
+  inputTokens: number
+  outputTokens: number
+  llmCalls: number
+  estCostUsd: number
 }
 
 // GeoJSON type augmentation

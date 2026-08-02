@@ -4,6 +4,7 @@ import AnalysisPanel from './components/AnalysisPanel/AnalysisPanel'
 import ResultsOverlay from './components/ResultsOverlay/ResultsOverlay'
 import EvidenceDrawer from './components/EvidenceDrawer/EvidenceDrawer'
 import ChannelDashboard from './components/ChannelDashboard/ChannelDashboard'
+import RunLog from './components/RunLog/RunLog'
 import { useAppStore } from './store'
 
 type SidebarView = 'analysis' | 'channels'
@@ -59,6 +60,8 @@ export default function App() {
       <div className="flex-1 relative">
         <MapView />
         <ResultsOverlay />
+        {/* Docked bottom console — renders nothing until a run has started */}
+        <RunLog />
       </div>
 
       {/* Evidence drawer (slides in from right on cell click) */}
