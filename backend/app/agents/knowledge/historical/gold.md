@@ -190,6 +190,28 @@ Approximately 600–900 formally documented sites (WA DNR inventory). Estimated 
 
 ## Scoring Rubric
 
+### Assay Primacy — Apply Before All Other Rubrics
+
+Reported assay, grade, and production values are the strongest class of historical
+evidence and take precedence over proximity-based scoring. When a database record
+in or adjacent to a cell carries actual numbers, score from the assay, not the district:
+
+| Assay Evidence in/adjacent to Cell | Score Range | Confidence | Notes |
+|---|---|---|---|
+| Ore-grade lode assays (≥5 g/t Au, or historical "high-grade" production records) | 0.85–0.95 | High | Direct proof of mineralization at this location. Quote the values in evidence. |
+| Sub-ore but strongly anomalous assays (0.5–5 g/t Au; Au_ppb ≥ 500 in rock/soil) | 0.65–0.85 | High | Mineralized system confirmed; economics, not geology, was the limit. |
+| Anomalous pathfinder assays (elevated As/Sb/Hg with trace Au) | 0.45–0.65 | Medium-High | Halo of a possible nearby system. |
+| Documented production tonnage/oz without surviving assay detail | 0.70–0.90 | High | Production is itself an assay proxy — score per District Proximity top rows. |
+| Trace/background values from systematic sampling | 0.10–0.25 | Medium-High | A real measurement of "not much here" — more meaningful than no data. |
+
+Rules of application:
+- Assay-backed scores are NOT capped by the District Proximity table; a high-grade
+  assay in an unnamed area outranks an assay-free cell inside a famous district.
+- District proximity WITHOUT any assay or production backing caps at ~0.6.
+- Apply the ±1 km MRDS location-uncertainty caveat: let a strong assay influence
+  the immediately adjacent cells at reduced strength, not just its host cell.
+- Always quote the numeric values and the source record name in evidence strings.
+
 ### District Proximity Scoring
 
 | Situation | Score Range | Confidence | Notes |

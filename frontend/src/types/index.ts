@@ -3,11 +3,29 @@
 export interface ScoredCell {
   cell_id: string
   geometry: GeoJSON.Geometry
-  score: number           // 0.0–1.0
+  score: number           // 0.0–1.0 absolute composite
   confidence: number      // 0.0–1.0
   evidence: string[]
   data_sources_used: string[]
+  // AOI-relative fields (set by the scoring engine)
+  relative_score?: number // min-max stretch within this AOI, 0–1
+  percentile?: number     // rank within this AOI, 0–1
   tier?: 'high' | 'medium' | 'low' | 'negligible'
+  // Set when this cell was interpolated from a coarser analysis grid
+  parent_cell_id?: string
+}
+
+// A completed analysis run kept in history so old polygons can be
+// revisited and deleted after viewing their data
+export interface AnalysisRun {
+  id: string
+  createdAt: string
+  targetMineral: string
+  resolutionM: number
+  aoi: GeoJSON.Feature
+  aoiAreaKm2: number
+  results: ScoredCell[]
+  agentResults: Record<string, AgentResult> | null
 }
 
 export interface AgentResult {

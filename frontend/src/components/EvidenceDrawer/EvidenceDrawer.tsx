@@ -13,10 +13,12 @@ export default function EvidenceDrawer({ cell, onClose }: Props) {
 
   if (!cell) return null
 
-  // Build per-agent breakdown from either lastAgentResults (dev mode) or currentJob (prod mode)
+  // Build per-agent breakdown from either lastAgentResults (dev mode) or currentJob (prod mode).
+  // Interpolated fine cells look up agent scores via their coarse parent cell.
+  const lookupId = cell.parent_cell_id ?? cell.cell_id
   const agentData = lastAgentResults || currentJob?.agent_results || {}
   const agentBreakdown = Object.entries(agentData).map(([agentId, result]: [string, any]) => {
-    const scored = result.scored_cells?.find((c: any) => c.cell_id === cell.cell_id)
+    const scored = result.scored_cells?.find((c: any) => c.cell_id === lookupId)
     return {
       agentId,
       score: scored?.score ?? null,
@@ -67,6 +69,7 @@ export default function EvidenceDrawer({ cell, onClose }: Props) {
           <div className="text-gray-400">Composite Score</div>
           <div className={`font-semibold ${tierColor(cell.score)}`}>
             {cell.score.toFixed(3)}
+            <span className="text-gray-500 font-normal ml-1">absolute</span>
           </div>
         </div>
         <div>
@@ -75,6 +78,23 @@ export default function EvidenceDrawer({ cell, onClose }: Props) {
             {(cell.confidence * 100).toFixed(0)}%
           </div>
         </div>
+        {cell.percentile != null && (
+          <div>
+            <div className="text-gray-400">Within this AOI</div>
+            <div className="font-semibold text-white">
+              Top {Math.max(1, Math.round((1 - cell.percentile) * 100))}%
+            </div>
+          </div>
+        )}
+        {cell.parent_cell_id && (
+          <div>
+            <div className="text-gray-400">Source</div>
+            <div className="font-semibold text-gray-300">
+              Interpolated
+              <span className="text-gray-500 font-normal ml-1">({cell.parent_cell_id})</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Agent breakdown — expandable */}

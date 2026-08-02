@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAppStore } from '../../store'
 import { runAnalysisDev } from '../../api/client'
-import type { ScoredCell } from '../../types'
+import type { AnalysisRun, ScoredCell } from '../../types'
 
 const MINERALS = ['gold', 'silver', 'copper', 'uranium', 'lithium', 'zinc', 'lead']
 const AGENTS: { id: string; label: string; description: string }[] = [
@@ -12,7 +12,11 @@ const AGENTS: { id: string; label: string; description: string }[] = [
   { id: 'remote_sensing', label: 'Remote Sensing', description: 'Alteration signatures from imagery' },
   { id: 'proximity', label: 'Proximity', description: 'Distance to known deposits' },
 ]
-const RESOLUTIONS = [250, 500, 1000, 2000, 5000]
+const RESOLUTIONS = [100, 250, 500, 1000, 2000, 5000]
+
+// Above this cell count the backend coarsens the LLM analysis grid and
+// interpolates back down — worth telling the user before they run.
+const MAX_LLM_CELLS = 150
 
 export default function AnalysisPanel() {
   const {
@@ -27,6 +31,7 @@ export default function AnalysisPanel() {
     isDrawing, setIsDrawing,
     aoiAreaKm2,
     setAoi, setAoiAreaKm2,
+    runs, activeRunId, addRun, activateRun, deleteRun,
   } = useAppStore()
 
   const [isRunning, setIsRunning] = useState(false)
@@ -94,8 +99,23 @@ export default function AnalysisPanel() {
             const cells = scores?.scored_cells ?? []
             setAnalysisResults(cells)
             // Save agent results for evidence drawer breakdown
-            if (event.agent_results) {
-              setLastAgentResults(event.agent_results as Record<string, any>)
+            const agentResults = (event.agent_results as Record<string, any>) ?? null
+            if (agentResults) {
+              setLastAgentResults(agentResults)
+            }
+            // Record in run history so the polygon can be revisited/deleted
+            if (aoi && cells.length > 0) {
+              const run: AnalysisRun = {
+                id: (crypto as any).randomUUID?.() ?? String(Date.now()),
+                createdAt: new Date().toISOString(),
+                targetMineral,
+                resolutionM,
+                aoi,
+                aoiAreaKm2: aoiAreaKm2 ?? 0,
+                results: cells,
+                agentResults,
+              }
+              addRun(run)
             }
           } else if (event.event === 'job_complete') {
             setIsRunning(false)
@@ -213,6 +233,15 @@ export default function AnalysisPanel() {
             <option key={r} value={r}>{r}m</option>
           ))}
         </select>
+        {aoiAreaKm2 !== null && (() => {
+          const estCells = Math.ceil(aoiAreaKm2 / Math.pow(resolutionM / 1000, 2))
+          return estCells > MAX_LLM_CELLS ? (
+            <p className="text-xs text-gray-500 mt-1">
+              ~{estCells.toLocaleString()} cells — agents will score a coarser
+              grid and interpolate down to {resolutionM}m.
+            </p>
+          ) : null
+        })()}
       </div>
 
       {/* Agent selection — checkboxes + weight sliders */}
@@ -320,6 +349,59 @@ export default function AnalysisPanel() {
           : `Run Analysis (${selectedAgentIds.length} agent${selectedAgentIds.length !== 1 ? 's' : ''})`
         }
       </button>
+
+      {/* Past runs — revisit or delete old polygons */}
+      {runs.length > 0 && (
+        <div>
+          <label className="block text-xs text-gray-400 mb-2 uppercase tracking-wider">
+            Past Runs
+          </label>
+          <div className="space-y-1.5">
+            {runs.map((run) => {
+              const isActive = run.id === activeRunId
+              const when = new Date(run.createdAt)
+              return (
+                <div
+                  key={run.id}
+                  className={`flex items-center gap-2 rounded border px-2.5 py-2 text-xs ${
+                    isActive
+                      ? 'border-blue-500/60 bg-gray-700/60'
+                      : 'border-gray-700 bg-gray-800/50'
+                  }`}
+                >
+                  <button
+                    onClick={() => activateRun(run.id)}
+                    disabled={isRunning}
+                    className="flex-1 text-left min-w-0"
+                    title="Show this run's polygon and results on the map"
+                  >
+                    <div className="text-gray-200 truncate">
+                      {run.targetMineral.charAt(0).toUpperCase() + run.targetMineral.slice(1)}
+                      <span className="text-gray-500"> · {run.aoiAreaKm2.toFixed(0)} km² · {run.resolutionM}m</span>
+                    </div>
+                    <div className="text-gray-500">
+                      {when.toLocaleDateString()} {when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {isActive && <span className="text-blue-400 ml-1.5">on map</span>}
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (window.confirm('Delete this run and remove its polygon from the map?')) {
+                        deleteRun(run.id)
+                      }
+                    }}
+                    disabled={isRunning}
+                    className="flex-shrink-0 px-2 py-1.5 rounded text-gray-500 hover:text-red-400 hover:bg-gray-700 transition-colors"
+                    title="Delete this run"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

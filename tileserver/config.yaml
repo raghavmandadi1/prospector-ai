@@ -1,34 +1,46 @@
-# Martin Tile Server Configuration
+# Martin Tile Server Configuration (Martin v1.x schema)
 # Serves vector tiles from PostGIS tables.
-# Docs: https://martin.maplibre.org/
+# Docs: https://maplibre.org/martin/config-file.html
 
 listen_addresses: "0.0.0.0:3000"
 
-# PostgreSQL connection — reads DATABASE_URL env var automatically,
-# but explicit config is provided here for clarity.
+# Total cache budget in MB (top-level scalar in v1.x; the old `cache:` block
+# is no longer recognized).
+cache_size_mb: 512
+
+# Do not abort startup if a configured table is missing — e.g. before the first
+# `alembic upgrade head`, the `features` table does not exist yet. Martin logs a
+# warning and keeps running; restart the tileserver after migrations so the
+# `features` source is published.
+on_invalid: warn
+
 postgres:
+  # Plain postgresql:// URL. The +asyncpg SQLAlchemy form used elsewhere is not
+  # parseable by Martin's driver — the tileserver's DATABASE_URL is set to a
+  # clean URL in docker-compose.yml.
   connection_string: ${DATABASE_URL}
   pool_size: 10
 
-# Expose individual tables as vector tile sources
-tables:
-  features:
-    schema: public
-    table: features
-    srid: 4326
-    geometry_column: geometry
-    geometry_type: GEOMETRY
-    properties:
-      - id
-      - source_channel
-      - feature_type
-      - name
-      - commodity_primary
-      - deposit_type
-      - status
-      - source_quality
-    # Tile URL: /features/{z}/{x}/{y}
+  # Skip startup geometry-bounds computation (fast boot, safe on an empty table).
+  auto_bounds: skip
 
-# Tile caching settings
-cache:
-  size_mb: 512
+  # Tables are nested under `postgres` in v1.x (previously top-level `tables:`).
+  tables:
+    features:
+      schema: public
+      table: features
+      srid: 4326
+      geometry_column: geometry
+      geometry_type: GEOMETRY
+      # properties is a name -> type map in v1.x (previously a list of names).
+      # Types mirror backend/app/models/feature.py.
+      properties:
+        id: uuid
+        source_channel: varchar
+        feature_type: varchar
+        name: varchar
+        commodity_primary: varchar
+        deposit_type: varchar
+        status: varchar
+        source_quality: float8
+      # Tile URL: /features/{z}/{x}/{y}

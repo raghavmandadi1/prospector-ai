@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { channelsApi } from '../../api/client'
 import type { Channel } from '../../types'
 

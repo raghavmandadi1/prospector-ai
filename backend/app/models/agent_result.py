@@ -17,6 +17,16 @@ class ScoredCell(BaseModel):
     evidence: List[str] = Field(default_factory=list)
     # Source identifiers (channel names or feature IDs) used for this score
     data_sources_used: List[str] = Field(default_factory=list)
+    # --- Fields set during synthesis / post-processing (None for per-agent cells) ---
+    # Score rescaled relative to the other cells in this AOI (min-max stretch, 0–1)
+    relative_score: Optional[float] = None
+    # Percentile rank of this cell's composite score within the AOI (0–1)
+    percentile: Optional[float] = None
+    # Tier assigned from AOI-relative percentile (high/medium/low/negligible)
+    tier: Optional[str] = None
+    # When this cell was interpolated from a coarser analysis grid, the id of
+    # the nearest coarse cell (used to look up per-agent evidence in the UI)
+    parent_cell_id: Optional[str] = None
 
 
 class AgentResult(BaseModel):

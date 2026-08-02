@@ -1,7 +1,8 @@
 import { create } from 'zustand'
-import type { AnalysisJob, ScoredCell } from '../types'
+import type { AnalysisJob, AnalysisRun, ScoredCell } from '../types'
 
 type ActiveView = 'analysis' | 'channels' | 'results'
+type ShadingMode = 'relative' | 'absolute'
 
 interface AppState {
   // AOI drawn by the user on the map (GeoJSON Feature with Polygon geometry)
@@ -55,6 +56,18 @@ interface AppState {
   // AOI area in km² (computed when polygon is drawn)
   aoiAreaKm2: number | null
   setAoiAreaKm2: (area: number | null) => void
+
+  // How the results grid is shaded: relative to this AOI, or absolute score
+  shadingMode: ShadingMode
+  setShadingMode: (mode: ShadingMode) => void
+
+  // History of completed runs (in-memory). Old polygons can be re-viewed
+  // and deleted after inspecting their data.
+  runs: AnalysisRun[]
+  activeRunId: string | null
+  addRun: (run: AnalysisRun) => void
+  activateRun: (id: string) => void
+  deleteRun: (id: string) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -110,4 +123,46 @@ export const useAppStore = create<AppState>((set) => ({
 
   aoiAreaKm2: null,
   setAoiAreaKm2: (aoiAreaKm2) => set({ aoiAreaKm2 }),
+
+  shadingMode: 'relative',
+  setShadingMode: (shadingMode) => set({ shadingMode }),
+
+  runs: [],
+  activeRunId: null,
+  addRun: (run) =>
+    set((state) => ({
+      runs: [run, ...state.runs].slice(0, 20), // cap history
+      activeRunId: run.id,
+    })),
+  activateRun: (id) =>
+    set((state) => {
+      const run = state.runs.find((r) => r.id === id)
+      if (!run) return {}
+      return {
+        activeRunId: id,
+        analysisResults: run.results,
+        lastAgentResults: run.agentResults,
+        aoi: run.aoi,
+        aoiAreaKm2: run.aoiAreaKm2,
+        targetMineral: run.targetMineral,
+        selectedCell: null,
+      }
+    }),
+  deleteRun: (id) =>
+    set((state) => {
+      const runs = state.runs.filter((r) => r.id !== id)
+      // If the deleted run is on-screen, clear the map
+      if (state.activeRunId === id) {
+        return {
+          runs,
+          activeRunId: null,
+          analysisResults: [],
+          lastAgentResults: null,
+          aoi: null,
+          aoiAreaKm2: null,
+          selectedCell: null,
+        }
+      }
+      return { runs }
+    }),
 }))

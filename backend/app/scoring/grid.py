@@ -5,6 +5,7 @@ Divides an AOI polygon into a regular grid of square cells at a given
 ground resolution. Grid cells are used as the unit of analysis for all
 specialist agents.
 """
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -12,6 +13,8 @@ from typing import Any, Dict, List
 from shapely.geometry import shape, box, mapping
 from shapely.ops import transform
 import pyproj
+
+from app.models.agent_result import ScoredCell
 
 
 @dataclass
@@ -105,3 +108,90 @@ def generate_grid(aoi_geojson: Dict[str, Any], resolution_m: float = 1000) -> Li
         col += 1
 
     return cells
+
+
+def interpolate_to_fine_grid(
+    coarse_cells: List[ScoredCell],
+    aoi_geojson: Dict[str, Any],
+    fine_resolution_m: float,
+    coarse_resolution_m: float,
+    idw_power: float = 2.0,
+    k_neighbors: int = 4,
+) -> List[ScoredCell]:
+    """
+    Downscale coarse LLM-scored cells to a finer display grid.
+
+    The LLM scores a coarse analysis grid (bounded cell count); this projects
+    those scores onto the requested fine grid (e.g. 100 m) using inverse-
+    distance weighting over the k nearest coarse cell centers. Evidence and
+    data sources are inherited from the nearest coarse cell, flagged as
+    interpolated so the provenance stays honest.
+    """
+    if not coarse_cells:
+        return []
+
+    fine_grid = generate_grid(aoi_geojson, fine_resolution_m)
+
+    # Coarse cell centers from geometry bounds (WGS84 degrees are fine for
+    # relative distances at AOI scale; latitudes are near-constant)
+    centers = []
+    for cc in coarse_cells:
+        g = shape(cc.geometry)
+        c = g.centroid
+        centers.append((c.x, c.y, cc))
+
+    # Pre-scale longitude by cos(mean latitude) so degree distances are ~isotropic
+    mean_lat = sum(c[1] for c in centers) / len(centers)
+    lon_scale = math.cos(math.radians(mean_lat))
+
+    fine_scored: List[ScoredCell] = []
+    for cell in fine_grid:
+        cx = (cell.bbox[0] + cell.bbox[2]) / 2
+        cy = (cell.bbox[1] + cell.bbox[3]) / 2
+
+        dists = []
+        for (px, py, cc) in centers:
+            dx = (cx - px) * lon_scale
+            dy = cy - py
+            dists.append((dx * dx + dy * dy, cc))
+        dists.sort(key=lambda t: t[0])
+        nearest = dists[: max(1, k_neighbors)]
+
+        # Exact / near-exact hit: adopt the coarse cell values directly
+        if nearest[0][0] < 1e-16:
+            parent = nearest[0][1]
+            score, confidence = parent.score, parent.confidence
+        else:
+            wsum = 0.0
+            score = 0.0
+            confidence = 0.0
+            for d2, cc in nearest:
+                w = 1.0 / (d2 ** (idw_power / 2.0))
+                wsum += w
+                score += w * cc.score
+                confidence += w * cc.confidence
+            score /= wsum
+            confidence /= wsum
+            parent = nearest[0][1]
+
+        fine_scored.append(
+            ScoredCell(
+                cell_id=cell.cell_id,
+                geometry=cell.geometry,
+                score=round(min(max(score, 0.0), 1.0), 4),
+                confidence=round(min(max(confidence, 0.0), 1.0), 4),
+                evidence=(
+                    [
+                        f"Interpolated from {coarse_resolution_m:.0f}m analysis "
+                        f"cell {parent.cell_id}"
+                    ]
+                    # Keep payload small — full evidence is available via the
+                    # parent cell in the per-agent breakdown
+                    + parent.evidence[:6]
+                ),
+                data_sources_used=parent.data_sources_used,
+                parent_cell_id=parent.cell_id,
+            )
+        )
+
+    return fine_scored

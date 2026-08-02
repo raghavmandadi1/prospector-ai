@@ -40,6 +40,41 @@ const TIER_COLORS: Record<string, string> = {
   negligible: '#6b7280', // gray-500
 }
 
+// Continuous prospectivity ramp. In 'relative' mode the value is the
+// AOI-relative score (best spots in THIS area); in 'absolute' mode it's the
+// raw composite. Same ramp, different driving value.
+function fillColorExpression(mode: 'relative' | 'absolute'): maplibregl.ExpressionSpecification {
+  const value =
+    mode === 'relative'
+      ? ['coalesce', ['get', 'relative_score'], ['get', 'score']]
+      : ['get', 'score']
+  return [
+    'interpolate',
+    ['linear'],
+    value,
+    0.0, TIER_COLORS.negligible,
+    0.35, TIER_COLORS.low,
+    0.65, TIER_COLORS.medium,
+    0.9, TIER_COLORS.high,
+    1.0, '#b91c1c', // red-700
+  ] as unknown as maplibregl.ExpressionSpecification
+}
+
+// Low-value cells fade back so the hotspots read at a glance
+function fillOpacityExpression(mode: 'relative' | 'absolute'): maplibregl.ExpressionSpecification {
+  const value =
+    mode === 'relative'
+      ? ['coalesce', ['get', 'relative_score'], ['get', 'score']]
+      : ['get', 'score']
+  return [
+    'interpolate',
+    ['linear'],
+    value,
+    0.0, 0.15,
+    1.0, 0.75,
+  ] as unknown as maplibregl.ExpressionSpecification
+}
+
 export default function MapView() {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
@@ -49,6 +84,7 @@ export default function MapView() {
     aoi, setAoi,
     isDrawing, setIsDrawing,
     setAoiAreaKm2,
+    shadingMode,
   } = useAppStore()
 
   const handleDrawCreate = useCallback((e: { features: GeoJSON.Feature[] }) => {
@@ -167,15 +203,8 @@ export default function MapView() {
         type: 'fill',
         source: 'results-grid',
         paint: {
-          'fill-color': [
-            'match',
-            ['get', 'tier'],
-            'high', TIER_COLORS.high,
-            'medium', TIER_COLORS.medium,
-            'low', TIER_COLORS.low,
-            TIER_COLORS.negligible,
-          ],
-          'fill-opacity': 0.6,
+          'fill-color': fillColorExpression('relative'),
+          'fill-opacity': fillOpacityExpression('relative'),
         },
       })
 
@@ -238,6 +267,9 @@ export default function MapView() {
         cell_id: cell.cell_id,
         score: cell.score,
         confidence: cell.confidence,
+        relative_score: cell.relative_score ?? cell.score,
+        percentile: cell.percentile ?? null,
+        parent_cell_id: cell.parent_cell_id ?? null,
         tier: cell.tier ?? scoreTier(cell.score),
         evidence: JSON.stringify(cell.evidence),
         data_sources_used: JSON.stringify(cell.data_sources_used),
@@ -246,6 +278,32 @@ export default function MapView() {
 
     source.setData({ type: 'FeatureCollection', features })
   }, [analysisResults])
+
+  // Re-shade when the user toggles relative/absolute mode
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !map.getLayer('results-cells')) return
+    map.setPaintProperty('results-cells', 'fill-color', fillColorExpression(shadingMode))
+    map.setPaintProperty('results-cells', 'fill-opacity', fillOpacityExpression(shadingMode))
+  }, [shadingMode])
+
+  // Keep the draw layer in sync with the store AOI:
+  // - aoi cleared (run deleted) → remove the polygon from the map
+  // - aoi set from run history → draw that run's polygon
+  useEffect(() => {
+    const draw = drawRef.current
+    if (!draw) return
+    const drawn = draw.getAll().features
+    if (!aoi) {
+      if (drawn.length > 0) draw.deleteAll()
+      return
+    }
+    const alreadyDrawn = drawn.some((f) => f.id === aoi.id)
+    if (!alreadyDrawn) {
+      draw.deleteAll()
+      draw.add(aoi as GeoJSON.Feature)
+    }
+  }, [aoi])
 
   // When isDrawing toggled from the panel, activate draw mode
   useEffect(() => {

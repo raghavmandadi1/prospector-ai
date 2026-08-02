@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import MapView from './components/Map/MapView'
 import AnalysisPanel from './components/AnalysisPanel/AnalysisPanel'
 import ResultsOverlay from './components/ResultsOverlay/ResultsOverlay'

@@ -14,10 +14,14 @@ Data sources used: USGS MRDS, BLM MLRS, state mine databases
 """
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from app.agents.base_agent import BaseAgent
-from app.models.agent_result import ScoredCell
+from app.agents.base_agent import (
+    BaseAgent,
+    RESPONSE_FORMAT_INSTRUCTIONS,
+    aoi_description,
+    cell_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ logger = logging.getLogger(__name__)
 class ProximityAgent(BaseAgent):
     agent_id = "proximity"
     agent_name = "Proximity Agent"
+    knowledge_domain = "proximity"
 
     def build_prompt(
         self,
@@ -35,61 +40,30 @@ class ProximityAgent(BaseAgent):
         known_deposits = spatial_context.get("known_deposits", [])
         grid_cells = spatial_context.get("grid_cells", [])
 
-        return f"""You are a mineral exploration analyst evaluating proximity factors for {target_mineral}.
+        deposits_section = (
+            f"## Known Deposits and Occurrences\n{json.dumps(known_deposits[:150], separators=(',', ':'))}"
+            if known_deposits
+            else "## Known Deposits and Occurrences\nNo pre-queried deposit data — use your knowledge of documented Washington State mines and prospects near these coordinates."
+        )
+
+        return f"""You are a mineral exploration analyst evaluating proximity factors for {target_mineral} in Washington State.
 
 ## Area of Interest
-{json.dumps(aoi_geojson, indent=2)}
+{aoi_description(grid_cells)}
+Number of cells in this batch: {len(grid_cells)}
 
-## Known Deposits and Occurrences
-{json.dumps(known_deposits[:100], indent=2) if known_deposits else "No deposit data available."}
+{deposits_section}
 
-## Grid Cells to Score
-{json.dumps([{"cell_id": c.get("cell_id"), "geometry": c.get("geometry")} for c in grid_cells[:50]], indent=2)}
+## Grid Cells (with center coordinates as lat, lon)
+{cell_summary(grid_cells)}
 
 ## Task
-Score each cell 0.0–1.0 based on proximity indicators:
+Score EVERY cell listed above 0.0–1.0 based on proximity indicators:
 1. Distance and density of known {target_mineral} deposits/mines
 2. Clustering patterns suggesting district-scale mineralization
 3. Presence of analogous deposit types
 4. Historic production records
+5. DO NOT default to zero — differentiate cells by distance to known occurrences; scores should span a range
 
-## Response Format
-Return ONLY a JSON array:
-```json
-[
-  {{
-    "cell_id": "...",
-    "score": 0.0,
-    "confidence": 0.0,
-    "evidence": ["..."],
-    "data_sources_used": ["usgs_mrds", "blm_mlrs"]
-  }}
-]
-```
+{RESPONSE_FORMAT_INSTRUCTIONS}
 """
-
-    def parse_llm_response(
-        self, response: str, grid_cells: List[Dict[str, Any]]
-    ) -> List[ScoredCell]:
-        parsed = self._safe_parse_json(response)
-        if not parsed or not isinstance(parsed, list):
-            return []
-
-        cell_map = {c.get("cell_id"): c for c in grid_cells}
-        scored = []
-        for item in parsed:
-            cell_id = item.get("cell_id")
-            cell = cell_map.get(cell_id)
-            if not cell:
-                continue
-            scored.append(
-                ScoredCell(
-                    cell_id=cell_id,
-                    geometry=cell.get("geometry", {}),
-                    score=float(item.get("score", 0.0)),
-                    confidence=float(item.get("confidence", 0.5)),
-                    evidence=item.get("evidence", []),
-                    data_sources_used=item.get("data_sources_used", []),
-                )
-            )
-        return scored

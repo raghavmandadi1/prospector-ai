@@ -15,7 +15,7 @@ from uuid import UUID
 
 from celery import Task
 
-from app.celery_worker import celery_app
+from celery_worker import celery_app
 from app.connectors.usgs_mrds import USGSMRDSConnector
 from app.connectors.blm_mlrs import BLMMLRSConnector
 from app.connectors.glo_records import GLORecordsConnector

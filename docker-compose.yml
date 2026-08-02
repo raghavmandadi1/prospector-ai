@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgis/postgis:15-3.4
@@ -8,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-geoprospector}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     ports:
-      - "5432:5432"
+      - "5433:5432"   # host 5433 -> container 5432; avoids clash with another Postgres on host 5432
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -84,7 +82,10 @@ services:
     volumes:
       - ./tileserver:/config
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://geoprospector:changeme@postgres:5432/geoprospector}
+      # Martin uses a Rust Postgres driver — it CANNOT parse the +asyncpg
+      # SQLAlchemy form in .env. Pass a plain postgresql:// URL literally
+      # (do not interpolate ${DATABASE_URL}, which carries the +asyncpg suffix).
+      DATABASE_URL: postgresql://geoprospector:changeme@postgres:5432/geoprospector
     depends_on:
       postgres:
         condition: service_healthy

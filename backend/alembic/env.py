@@ -16,6 +16,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# Override the hardcoded localhost sqlalchemy.url in alembic.ini with the app's
+# DATABASE_URL (from the environment / .env). Inside the docker-compose network
+# Postgres is reachable as `postgres`, not `localhost`, so the ini default fails.
+from app.config import settings  # noqa: E402
+config.set_main_option("sqlalchemy.url", settings.database_url)
+
 target_metadata = Base.metadata
 
 

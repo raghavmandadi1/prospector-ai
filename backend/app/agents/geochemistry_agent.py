@@ -14,10 +14,14 @@ Data sources used: USGS NGDB, state geochemical surveys
 """
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from app.agents.base_agent import BaseAgent
-from app.models.agent_result import ScoredCell
+from app.agents.base_agent import (
+    BaseAgent,
+    RESPONSE_FORMAT_INSTRUCTIONS,
+    aoi_description,
+    cell_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ logger = logging.getLogger(__name__)
 class GeochemistryAgent(BaseAgent):
     agent_id = "geochemistry"
     agent_name = "Geochemistry Agent"
+    knowledge_domain = "geochemistry"
 
     def build_prompt(
         self,
@@ -35,61 +40,39 @@ class GeochemistryAgent(BaseAgent):
         samples = spatial_context.get("geochemical_samples", [])
         grid_cells = spatial_context.get("grid_cells", [])
 
-        return f"""You are a geochemist identifying elemental anomalies indicative of {target_mineral} mineralization.
+        if samples:
+            samples_section = (
+                "## Geochemical Sample Data\n"
+                "Each sample includes location and assay values under "
+                "'geochemical_values' (e.g. Au_ppb, As_ppm).\n"
+                f"{json.dumps(samples[:200], separators=(',', ':'))}"
+            )
+        else:
+            samples_section = (
+                "## Geochemical Sample Data\n"
+                "No geochemical samples available for this area — flag as a data "
+                "gap. Use your knowledge of regional geochemical patterns in "
+                "Washington State, and keep confidence LOW (0.1-0.3)."
+            )
+
+        return f"""You are a geochemist identifying elemental anomalies indicative of {target_mineral} mineralization in Washington State.
 
 ## Area of Interest
-{json.dumps(aoi_geojson, indent=2)}
+{aoi_description(grid_cells)}
+Number of cells in this batch: {len(grid_cells)}
 
-## Geochemical Sample Data
-{json.dumps(samples[:200], indent=2) if samples else "No geochemical data available — flag as data gap."}
+{samples_section}
 
-## Grid Cells to Score
-{json.dumps([{"cell_id": c.get("cell_id"), "geometry": c.get("geometry")} for c in grid_cells[:50]], indent=2)}
+## Grid Cells (with center coordinates as lat, lon)
+{cell_summary(grid_cells)}
 
 ## Task
-Score each cell 0.0–1.0 based on geochemical indicators for {target_mineral}:
-1. Identify pathfinder elements and their threshold exceedances
-2. Map multi-element halos and dispersion patterns
-3. Flag data gaps where no samples exist
-4. Assess sampling density adequacy
+Score EVERY cell listed above 0.0–1.0 based on geochemical indicators for {target_mineral}:
+1. ASSAY VALUES ARE PRIMARY EVIDENCE — cells containing samples with anomalous or ore-grade values must anchor the top of your score range; quote the values in evidence strings
+2. Identify pathfinder elements and their threshold exceedances (Au, As, Sb, Hg for gold)
+3. Map multi-element halos and dispersion patterns; samples are often downstream/downslope of source
+4. Flag data gaps where no samples exist (low confidence, not zero score)
+5. DIFFERENTIATE between cells — scores should span a range, not cluster at one value
 
-## Response Format
-Return ONLY a JSON array:
-```json
-[
-  {{
-    "cell_id": "...",
-    "score": 0.0,
-    "confidence": 0.0,
-    "evidence": ["Au anomaly: 3x background", "As pathfinder elevated"],
-    "data_sources_used": ["usgs_ngdb"]
-  }}
-]
-```
+{RESPONSE_FORMAT_INSTRUCTIONS}
 """
-
-    def parse_llm_response(
-        self, response: str, grid_cells: List[Dict[str, Any]]
-    ) -> List[ScoredCell]:
-        parsed = self._safe_parse_json(response)
-        if not parsed or not isinstance(parsed, list):
-            return []
-
-        cell_map = {c.get("cell_id"): c for c in grid_cells}
-        scored = []
-        for item in parsed:
-            cell_id = item.get("cell_id")
-            cell = cell_map.get(cell_id)
-            if not cell:
-                continue
-            scored.append(
-                ScoredCell(
-                    cell_id=cell_id,
-                    geometry=cell.get("geometry", {}),
-                    score=float(item.get("score", 0.0)),
-                    confidence=float(item.get("confidence", 0.5)),
-                    evidence=item.get("evidence", []),
-                    data_sources_used=item.get("data_sources_used", []),
-                )
-            )
-        return scored
