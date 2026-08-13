@@ -27,6 +27,16 @@ class ScoredCell(BaseModel):
     # When this cell was interpolated from a coarser analysis grid, the id of
     # the nearest coarse cell (used to look up per-agent evidence in the UI)
     parent_cell_id: Optional[str] = None
+    # --- Novelty (set by orchestrator._attach_novelty) ---
+    # Distance from this cell to the nearest recorded mineral occurrence, km.
+    nearest_occurrence_km: Optional[float] = None
+    nearest_occurrence_name: Optional[str] = None
+    # confirms | extends | lead — whether a high score here is the model agreeing
+    # with the record or pointing somewhere nothing is recorded. None means
+    # UNKNOWN (no occurrence extract built) and must render as nothing: treating
+    # missing data as "nothing recorded nearby" would turn an absent file into a
+    # prospecting signal.
+    novelty: Optional[str] = None
 
 
 class AgentUsage(BaseModel):

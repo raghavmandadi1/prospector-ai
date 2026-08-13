@@ -110,6 +110,56 @@ def cell_summary(cells: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def cell_facts_block(
+    cells: List[Dict],
+    cell_facts: Dict[str, Dict[str, Any]],
+    render: Callable[[Dict[str, Any]], Optional[str]],
+    header: str,
+    empty_note: str = "",
+) -> str:
+    """One line of domain evidence per cell, keyed to the batch labels.
+
+    This is where the pipeline stops asking the model to do a spatial join in its
+    head. Before per-cell facts existed, a prompt handed over a JSON blob of
+    AOI-wide records and a list of cell centres and left the model to work out
+    which record belonged to which cell. It cannot do that reliably, and when it
+    fails it fails silently — by smearing one district's evidence across every
+    cell in the polygon. The join is now done in Python, and each cell is told
+    only what is true of *it*.
+
+    ``render`` returns the line for one cell's facts, or None when this domain has
+    nothing to say about that cell. Cells with nothing are listed as "no data"
+    rather than omitted: an absent line reads as an oversight, and a model filling
+    a perceived gap with a plausible guess is exactly the behaviour to avoid.
+
+    Returns "" when no cell in the batch has any facts, so an agent running
+    without its data source keeps its original prompt shape instead of gaining an
+    empty section.
+    """
+    if not cell_facts:
+        return ""
+
+    lines: List[str] = []
+    any_data = False
+    for i, c in enumerate(cells):
+        facts = cell_facts.get(c.get("cell_id", "")) or {}
+        rendered = render(facts) if facts else None
+        if rendered:
+            any_data = True
+            lines.append(f"  - {batch_label(i)}: {rendered}")
+        else:
+            lines.append(f"  - {batch_label(i)}: no data")
+
+    if not any_data:
+        return ""
+
+    parts = [header]
+    if empty_note:
+        parts.append(empty_note)
+    parts.append("\n".join(lines))
+    return "\n".join(parts)
+
+
 def aoi_description(grid_cells: List[Dict]) -> str:
     """Human-readable AOI bounding box derived from the grid cells."""
     bboxes = [c.get("bbox", [0, 0, 0, 0]) for c in grid_cells]
@@ -412,15 +462,36 @@ class BaseAgent(ABC):
     ) -> Dict[str, Any]:
         """The spatial-context slice that could influence this cell's score.
 
-        Agents currently build prompts from the AOI-wide record lists rather
-        than per-cell subsets, so the honest hash input is the whole domain
-        payload. Narrow this when agents start filtering by cell — a tighter
-        hash means fewer spurious invalidations, never more.
+        Two parts, and both are needed:
+
+        * ``cell`` — the per-cell facts block, which is now the primary evidence
+          in every prompt. This is the part that had to be added: `cell_facts` is
+          a dict, and the previous implementation kept only list and str values,
+          so a cell's own geology, structures and occurrence record would have
+          been invisible to the cache key. Every cell would have gone on serving
+          a score computed before it had any evidence at all — a stale-cache bug
+          that produces plausible numbers and no error.
+        * ``aoi`` — the AOI-wide summaries, because the prompts still render them
+          and a cell's score can therefore move when they change. This is
+          deliberately conservative: it costs cache hits when an AOI shifts
+          slightly, and the alternative costs correctness.
         """
+        cell_facts = spatial_context.get("cell_facts") or {}
         return {
-            k: v
-            for k, v in spatial_context.items()
-            if k not in ("grid_cells", "aoi_geojson") and isinstance(v, (list, str))
+            "cell": cell_facts.get(cell_id),
+            "aoi": {
+                k: v
+                for k, v in spatial_context.items()
+                if k
+                not in (
+                    "grid_cells",
+                    "aoi_geojson",
+                    "cell_facts",
+                    "cell_novelty",
+                    "roles_active",
+                )
+                and isinstance(v, (list, str))
+            },
         }
 
     def _split_cached(

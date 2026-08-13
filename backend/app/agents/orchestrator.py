@@ -186,16 +186,30 @@ class OrchestratorAgent:
                 use_cache=config.get("use_cache", True),
             )
 
-            # 2. Build spatial context for each agent domain (PostGIS queries)
-            spatial_context = await self._build_spatial_context(aoi_geojson, grid_cells)
+            # 2. Build spatial context for each agent domain (local files, then
+            #    PostGIS on top where it is reachable)
+            spatial_context = await self._build_spatial_context(
+                aoi_geojson, grid_cells, target_mineral
+            )
             spatial_ctx_ref = spatial_context
 
-            # Report what the agents will actually see. This query fails
-            # silently in DEV_MODE (no asyncpg), and a run where every count
-            # is zero is a run scored entirely from LLM regional priors.
+            # Report what the agents will actually see. A run where every count
+            # is zero and `sources` is empty is a run scored entirely from LLM
+            # regional priors, and it should be obvious in the log that it was.
+            cells_with_facts = sum(
+                1 for f in (spatial_context.get("cell_facts") or {}).values() if f
+            )
             await emit_fn({
                 "event": "spatial_context",
                 "error": spatial_context.get("_error"),
+                "sources": spatial_context.get("context_sources") or [],
+                "cells_with_facts": cells_with_facts,
+                "cells_total": len(grid_cells),
+                # Which evidence actually covers THIS polygon, as opposed to
+                # which artifacts happen to be installed. The 1:24k geology is a
+                # quadrangle mosaic with real gaps, so those two are different
+                # claims and only this one is about the run in front of you.
+                "coverage": spatial_context.get("coverage") or {},
                 "counts": {
                     k: len(v)
                     for k, v in spatial_context.items()
@@ -247,6 +261,9 @@ class OrchestratorAgent:
             # THIS area", not "score vs the rest of the world"
             scored_cells = normalize_relative(scored_cells)
 
+            # 4d. Novelty — is a high score finding something, or re-finding it?
+            self._attach_novelty(scored_cells, spatial_context)
+
             # 5. Build final output
             final_scores = {
                 "scored_cells": [cell.model_dump() for cell in scored_cells],
@@ -289,6 +306,55 @@ class OrchestratorAgent:
             )
 
     @staticmethod
+    def _attach_novelty(
+        scored_cells: List, spatial_context: Dict[str, Any]
+    ) -> None:
+        """Annotate each scored cell with its distance to the nearest record.
+
+        The reason this matters is the whole point of putting known workings on
+        the map: when a cell scores high, the immediate question is *is this
+        finding something, or re-finding something?* A hot cell sitting on three
+        recorded workings is the model confirming known ground. A hot cell with
+        nothing recorded within two miles is a lead. On a plain choropleth those
+        two look identical and they mean opposite things.
+
+        Cells interpolated down to a finer display grid inherit from their
+        analysis parent — the occurrence facts were computed on the coarse cell,
+        and inventing a finer distance we never measured would be worse than
+        inheriting a coarse one.
+
+        A cell left with ``novelty is None`` is *unknown*, not novel. The UI must
+        render nothing in that case: with no occurrence extract built, calling
+        every cell a lead would turn missing data into a prospecting signal.
+        """
+        novelty = spatial_context.get("cell_novelty") or {}
+        if not novelty:
+            return
+        annotated = 0
+        for cell in scored_cells:
+            info = novelty.get(cell.cell_id)
+            if info is None:
+                parent = getattr(cell, "parent_cell_id", None)
+                if parent:
+                    info = novelty.get(parent)
+            if not info:
+                continue
+            cell.nearest_occurrence_km = info.get("nearest_occurrence_km")
+            cell.nearest_occurrence_name = info.get("nearest_occurrence_name")
+            cell.novelty = info.get("novelty")
+            annotated += 1
+        if annotated:
+            counts: Dict[str, int] = {}
+            for cell in scored_cells:
+                key = getattr(cell, "novelty", None) or "unknown"
+                counts[key] = counts.get(key, 0) + 1
+            logger.info(
+                "Novelty: %s (of %d cells)",
+                ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
+                len(scored_cells),
+            )
+
+    @staticmethod
     def _finalize_record(
         recorder: RunRecorder,
         agent_results: List[AgentResult],
@@ -318,13 +384,20 @@ class OrchestratorAgent:
                 provenance_block(
                     knowledge_files=knowledge_files,
                     agents_without_knowledge=ungrounded,
-                    # "Available" means records actually reached the agents —
-                    # not merely that the query did not raise.
+                    # "Available" means evidence actually reached the agents —
+                    # not merely that a query did not raise. Per-cell facts count
+                    # for this even when the AOI-wide lists are thin, because the
+                    # per-cell block is now the primary evidence in every prompt.
                     spatial_context_available=(
                         spatial_context.get("_error") is None
-                        and any(counts.values())
+                        and (
+                            any(counts.values())
+                            or any((spatial_context.get("cell_facts") or {}).values())
+                        )
                     ),
                     model=MODEL_NAME,
+                    context_sources=spatial_context.get("context_sources") or [],
+                    pin_roles_active=spatial_context.get("roles_active") or {},
                 )
             )
             recorder.set_timings(
@@ -335,6 +408,13 @@ class OrchestratorAgent:
                 },
             )
             recorder.set_cache_stats(hits, misses)
+            # Which evidence covered this AOI. The benchmark needs it to explain
+            # why two runs of nominally the same configuration differ, and it is
+            # the difference between "the model was wrong" and "the model had
+            # nothing to go on here".
+            recorder.set_inputs(
+                spatial_coverage=spatial_context.get("coverage") or {}
+            )
             recorder.write()
         except Exception as exc:  # pragma: no cover — bookkeeping only
             logger.warning(f"Run record finalization failed: {exc}")
@@ -414,26 +494,63 @@ class OrchestratorAgent:
         self,
         aoi_geojson: Dict[str, Any],
         grid_cells: List,
+        target_mineral: str = "gold",
     ) -> Dict[str, Any]:
         """
-        Query PostGIS for features relevant to each agent domain.
+        Everything the agents will know about this ground beyond their own prior.
 
-        Best-effort: if the database is unavailable (e.g. dev mode without
-        docker services), agents fall back to LLM regional knowledge with
-        empty context lists.
+        Two sources, in this order:
+
+        1. **Local files** (`app.spatial.local_store`) — WA DNR mines and
+           districts, the 1:24k surface geology, the OF-00-495 WofE grids, GNIS
+           toponyms, imported field pins. This is the primary source and it works
+           on every path, because it is `sqlite3` and `json` against files on
+           disk.
+        2. **PostGIS**, merged on top when it has rows. This is still the right
+           home for ingested connector data in production, but it must not be the
+           only source: under `DEV_MODE` the import on the second line of the
+           block below raises `ModuleNotFoundError` (asyncpg is deliberately not
+           in `requirements-dev.txt`), which is how every agent came to receive an
+           empty dict on the path everyone actually runs.
+
+        `_error` is set only when *both* sources came up empty, so it means what
+        it says — the agents are scoring from model prior alone.
         """
         context: Dict[str, Any] = {
             "grid_cells": [cell.model_dump() if hasattr(cell, "model_dump") else cell.__dict__ for cell in grid_cells],
             "aoi_geojson": aoi_geojson,
-            # Set when the PostGIS query fails so the failure reaches the run
-            # log instead of only the server's stderr. Agents ignore this key.
+            # Set when no evidence source produced anything, so the failure
+            # reaches the run log instead of only the server's stderr. Agents
+            # ignore this key.
             "_error": None,
             "geology_units": [],
             "fault_traces": [],
             "known_deposits": [],
             "geochemical_samples": [],
             "historic_mines": [],
+            "cell_facts": {},
+            "cell_novelty": {},
+            "context_sources": [],
+            "roles_active": {},
         }
+
+        # --- 1. Local files -----------------------------------------------
+        # Synchronous file and SQLite reads. Run off the event loop so a large
+        # AOI's geometry work does not stall the SSE heartbeat — the dev path
+        # streams events on the same task that would otherwise be blocked here.
+        try:
+            from app.spatial.local_store import build_local_context
+
+            local = await asyncio.to_thread(
+                build_local_context,
+                aoi_geojson,
+                context["grid_cells"],
+                target_mineral,
+            )
+            context.update({k: v for k, v in local.items() if v or k in context})
+        except Exception as exc:
+            logger.warning("Local spatial context failed (%s)", exc, exc_info=True)
+            context["local_error"] = f"{type(exc).__name__}: {exc}"
 
         # AOI bbox (expanded ~2 km so district-edge records are visible)
         bboxes = [c.bbox if hasattr(c, "bbox") else c.get("bbox") for c in grid_cells]
@@ -445,6 +562,7 @@ class OrchestratorAgent:
         max_lon = max(b[2] for b in bboxes) + pad
         max_lat = max(b[3] for b in bboxes) + pad
 
+        # --- 2. PostGIS, merged on top ------------------------------------
         try:
             from sqlalchemy import select, func
             from app.db.session import AsyncSessionLocal
@@ -514,10 +632,33 @@ class OrchestratorAgent:
                 len(context["fault_traces"]),
             )
         except Exception as exc:
-            context["_error"] = f"{type(exc).__name__}: {exc}"
+            # Expected under DEV_MODE: `app.db.session` calls create_async_engine()
+            # at module scope with a postgresql+asyncpg:// URL and asyncpg is not a
+            # dev dependency. Not fatal, and no longer fatal to the *evidence* —
+            # the local store above has already run.
+            context["postgis_error"] = f"{type(exc).__name__}: {exc}"
+            logger.info(
+                "PostGIS spatial context unavailable (%s); using local files only",
+                exc,
+            )
+
+        has_records = any(
+            isinstance(v, list) and v
+            for k, v in context.items()
+            if k not in ("grid_cells",)
+        ) or bool(context.get("cell_facts"))
+
+        if not has_records:
+            # Only now is the old warning accurate. Say which source failed, so
+            # "no evidence" is actionable rather than a mystery.
+            reason = context.get("local_error") or context.get("postgis_error") or (
+                "no local artifacts built and no database"
+            )
+            context["_error"] = reason
             logger.warning(
-                f"Spatial context query failed ({exc}); agents will run on "
-                f"LLM regional knowledge only"
+                "No spatial evidence for this AOI (%s); agents will run on LLM "
+                "regional knowledge only",
+                reason,
             )
 
         return context

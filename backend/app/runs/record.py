@@ -95,11 +95,23 @@ def provenance_block(
     agents_without_knowledge: List[str],
     spatial_context_available: bool,
     model: str,
+    context_sources: Optional[List[str]] = None,
+    pin_roles_active: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Everything needed to interpret a score change between two runs.
 
     ``knowledge_files`` maps ``"<domain>/<file>.md"`` → the file's text (or None
     when the agent ran ungrounded); the text is hashed, not stored.
+
+    ``context_sources`` names the local artifacts the agents actually saw, e.g.
+    ``["wa_occurrences.geojson", "wa_geology.sqlite"]``. Two runs of the same AOI
+    on the same commit can differ purely because one of those files was built in
+    between, and without this the difference is invisible.
+
+    ``pin_roles_active`` is the census of imported field pins by role. It is here
+    for one reason: a benchmark number is only meaningful if no ``truth`` pin was
+    visible to the model, and this is the record that lets that be audited after
+    the fact rather than trusted ("steps for raghav 2.0" §30).
     """
     return {
         **git_state(),
@@ -113,6 +125,8 @@ def provenance_block(
         },
         "agents_without_knowledge": sorted(agents_without_knowledge),
         "spatial_context_available": spatial_context_available,
+        "context_sources": sorted(context_sources or []),
+        "pin_roles_active": dict(sorted((pin_roles_active or {}).items())),
         "dev_mode": settings.dev_mode,
     }
 

@@ -211,6 +211,104 @@ Rules of application:
 - Apply the ±1 km MRDS location-uncertainty caveat: let a strong assay influence
   the immediately adjacent cells at reduced strength, not just its host cell.
 - Always quote the numeric values and the source record name in evidence strings.
+- **Do not infer whether a nearby occurrence was assay-backed or production-backed.**
+  You are now given authoritative boolean flags for both. Look them up — see the
+  next section, "WA DNR Record Flags".
+
+### WA DNR Record Flags — Hard Lookup, Not Inference
+
+The occurrence records you receive per cell come from **WA DNR / WGS Mines & Minerals**
+(`Gold_Silver_Locations`, 1,467 sites; `Metallic_Mineral_Locations`, 1,847 sites) and carry
+machine-readable fields. These are compiled facts from the state survey, not your inference:
+
+| Field | Type | What it is |
+|---|---|---|
+| `assays` | bool | `true` ⇔ the WA DNR record notes that assay data exists for the site |
+| `production` | bool | `true` ⇔ the record notes recorded production from the site |
+| `accuracy_class` | enum | `survey` / `topo` / `derived` / `variable` / `district_centroid` / `unknown` |
+| `ore_minerals`, `gangue` | text | observed mineralogy at the site |
+| `district` | text | mapped mining district membership (68 districts statewide) |
+| `doc_count`, `docs` | int, list | rows in `Metallic_Minerals_Scanned_Documents` (107,739 statewide); up to 3 titles, newest first |
+| `comments` | text | free text — **the one place actual numeric grades sometimes appear** |
+
+**What the flags do and do not say.** `assays: true` means *a measurement exists somewhere in the
+literature*, usually in a scanned bulletin. It is **not** a grade, and it is certainly not "ore
+grade". `production: true` means the site produced, **not how much** — production amounts exist at
+district scale (`district.production_amount`), not per site. Treating either flag as a grade is the
+fastest way to produce a confidently wrong high score.
+
+**Calibrate against the base rates.** Of the 1,467 gold/silver sites, 649 (44%) have `assays: true`
+and 450 (31%) have `production: true`. Roughly a third of all sites carry a production flag, so
+`production: true` is *common, not extraordinary* — it does not by itself justify a 0.90.
+
+#### Score bands keyed off the two booleans
+
+For a flagged site **in or immediately adjacent to the cell** (within about one cell width). Apply
+the distance decay from the District Proximity Scoring table below on top of these, and the accuracy
+modifier from the next subsection.
+
+| `production` | `assays` | Evidence class | Score | Confidence |
+|---|---|---|---|---|
+| `true` | `true` | Past producer with surviving assay documentation — the strongest historical class available | 0.80–0.92 | 0.70–0.85 |
+| `true` | `false` | Recorded production, no assay compilation. Production is itself an assay proxy. | 0.70–0.85 | 0.65–0.80 |
+| `false` | `true` | Chemically characterised prospect that never produced — mineralization confirmed, economics or depth was the limit | 0.55–0.72 | 0.60–0.75 |
+| `false` | `false` | Occurrence noted, nothing measured, nothing mined | 0.25–0.45 | 0.45–0.60 |
+
+Two escalations remain available above these bands, and only these two:
+
+- **Numeric grades quoted in `comments`.** If the text carries oz/ton, g/t, ppm or percentages,
+  score from the numbers under the Assay Primacy table above and quote them verbatim. This is the
+  only route to the 0.85–0.95 band from a single record.
+- **Multiple production-flagged sites** clustered around the cell, at least one `survey`/`topo`
+  located — a district-scale producing pattern rather than one site.
+
+#### `accuracy_class` modifies the DISTANCE argument, not the evidence class
+
+The flags tell you *what* was found. `accuracy_class` tells you *how well anyone knows where*.
+
+| `accuracy_class` | n (gold/silver layer) | Positional tolerance | Effect on your argument |
+|---|---|---|---|
+| `survey` | 45 | ±50–100 m | Can anchor a single cell at 500–1000 m resolution |
+| `topo` | 244 | ±100–500 m | Can anchor a cell; note 213 of the 244 are the weaker "generally from 7.5-minute map" variant |
+| `derived` | 237 | ±0.4–2 km | Spreads over 1–4 cells. A PLSS quarter-quarter is a 400 m square; a bare section is 1,609 m. |
+| `variable` | **917** | **≥ ±2 km, unbounded** | **Neighbourhood-scale statement only.** Never a single-cell spike. |
+| `district_centroid` | 24 | tens of km | **Not a site.** Never anchors a distance argument at all — fall back to district membership. |
+| `unknown` | — | treat as `variable` | |
+
+Rules:
+
+- **62.5% of the gold/silver sites are `variable`.** An evidence class of "past producer with
+  assays" on a `variable`-accuracy site is a strong statement about the *district* and a weak one
+  about the *cell*. Spread it; do not spike it.
+- A flag-driven score above **0.75** requires at least one `survey` or `topo` site in the supporting
+  set. Otherwise cap at 0.70 and say why in the evidence.
+- If `accuracy_class == "district_centroid"`, discard the reported distance entirely and score from
+  district membership. These 24 records are district centres masquerading as sites.
+
+#### How this changes the MRDS caveat
+
+The MRDS positional-accuracy warning elsewhere in this file still stands — MRDS points really are
+approximate. What has changed is that **`accuracy_class` now tells you which records are
+survey-grade, so a blanket ±1 km caveat over everything is no longer the right response.** A blanket
+caveat throws away the 45 GPS-located sites along with the 917 variable ones. Apply the
+per-record tolerance from the table above instead, and keep the blanket caveat only for records that
+arrive without an `accuracy_class`.
+
+#### Mineralogy and document count
+
+- `ore_minerals` / `gangue` are real observations and are your check that the nearby style is
+  actually gold-bearing. Arsenopyrite, adularia, chalcedonic quartz and bladed calcite support a
+  gold interpretation; a **galena–sphalerite-dominant** assemblage is the Metaline base-metal style
+  and scores 0.10–0.25 for gold regardless of its flags — see "Polymetallic Associations" below.
+- `doc_count` is corroboration of **existence and significance, not of grade**: a site written about
+  in five scanned bulletins was real and was thought to matter. Treat `doc_count ≥ 3` as +0.03, and
+  never as a substitute for the assay and production flags.
+
+Cite `WA_DNR_WGS_Mines_and_Minerals` in `data_sources_used` whenever any of these fields carried
+your score, and quote the flag values and `accuracy_class` in the evidence string so a reader can
+check the lookup: e.g. `"'Lone Pine' 0.6 km, production=true, assays=true, accuracy_class=topo —
+past producer with surviving assay documentation; flags read directly from the WA DNR record, not
+inferred."`
 
 ### District Proximity Scoring
 

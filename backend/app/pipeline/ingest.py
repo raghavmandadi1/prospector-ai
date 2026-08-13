@@ -22,6 +22,7 @@ from app.connectors.glo_records import GLORecordsConnector
 from app.connectors.usgs_ngdb import USGSNGDBConnector
 from app.connectors.macrostrat import MacrostratConnector
 from app.connectors.mindat import MindatConnector
+from app.connectors.wa_dnr_minerals import WADNRMineralsConnector
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ CONNECTOR_REGISTRY = {
     "usgs_ngdb": USGSNGDBConnector,
     "macrostrat": MacrostratConnector,
     "mindat": MindatConnector,
+    # Refresh path only — the analysis path reads the static extract in
+    # data/reference/. See the header of connectors/wa_dnr_minerals.py.
+    "wa_dnr_minerals": WADNRMineralsConnector,
 }
 
 
