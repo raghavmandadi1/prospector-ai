@@ -11,6 +11,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
 RUNS_DIR = DATA_DIR / "runs"
 CACHE_DIR = DATA_DIR / "cache"
+#: Small, human-servable reference layers. Tracked in git.
+REFERENCE_DIR = DATA_DIR / "reference"
+#: Machine-built artifacts derived from data/raw/ by scripts/build_*.py.
+#: Gitignored and absent on a fresh clone — every consumer must degrade.
+DERIVED_DIR = DATA_DIR / "derived"
+#: Imported field pins (scripts/import_field_pins.py). Gitignored.
+USER_SITES_DIR = DATA_DIR / "user_sites"
 
 
 class Settings(BaseSettings):
@@ -54,6 +61,21 @@ class Settings(BaseSettings):
     # Per-cell, per-agent score cache keyed on everything that could change the
     # answer (model, prompt version, knowledge file hash, spatial context hash).
     cache_enabled: bool = True
+
+    # --- Local spatial context (data/reference/ + data/derived/) -------------
+    # The agents' evidence base. Read straight off disk rather than through
+    # PostGIS, because the PostGIS path is dead under DEV_MODE (no asyncpg) and
+    # DEV_MODE is the path everyone actually runs — see CLAUDE.md Known Gap #2.
+    # Turning this off reproduces the old "LLM regional knowledge only" runs,
+    # which is occasionally what you want when measuring what the data adds.
+    local_context_enabled: bool = True
+    # How far around a cell to look for recorded occurrences, kilometres. Also
+    # the radius beyond which a cell is called a lead rather than a re-find.
+    occurrence_search_radius_km: float = 5.0
+    # Per-cell record caps. These bound prompt size, which bounds cost: a cell
+    # in the middle of the Republic district can have dozens of occurrences and
+    # the marginal ones do not change the score.
+    max_records_per_cell: int = 6
 
     class Config:
         env_file = ".env"

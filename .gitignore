@@ -59,6 +59,19 @@ data/raw/
 # raw-LLM blocks make them large. benchmarks/baselines/ IS tracked; these are not.
 data/runs/
 data/cache/
+
+# Derived spatial stores, built from data/raw/ by scripts/build_*.py. Large
+# (the geology store is a substantial fraction of the 218 MB source), fully
+# reproducible, and machine-generated — so rebuilt, never committed. Everything
+# that reads them degrades when they are absent, which is the state on a fresh
+# clone. data/reference/ IS tracked: those extracts are small and are what the
+# map serves.
+data/derived/
+
+# Imported field pins. Somebody's own field notes and GPS positions of workings
+# they walked to — not ours to publish, and the "not in any database" set is
+# genuinely sensitive.
+data/user_sites/
 # but keep the README and any human-curated docs we put in data/
 !data/README.md
 
@@ -75,3 +88,6 @@ data/literature/
 # ArcGIS / ESRI scratch + lock files
 *.sr.lock
 *.gdb.lock
+
+# Personal working notes — scratch, not documentation.
+steps for raghav*.md
