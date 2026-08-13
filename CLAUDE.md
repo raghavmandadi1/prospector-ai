@@ -14,8 +14,17 @@ AI agents in parallel to score a user-drawn area of interest (AOI) on an interac
 
 The core output is a **scored, color-coded grid** with per-cell evidence drilldown — not a
 generic heatmap. The design goal is that every score is backed by traceable evidence from
-named data sources. **Read "Known Gaps" below before trusting a score** — that goal is not
-currently met on the default dev path.
+named data sources.
+
+As of 2026-08-12 that is partly true, and the split matters. Every cell now carries real
+per-cell evidence read off disk: recorded occurrences with WA DNR's own assay and production
+flags, mining districts, abandoned workings, corroborated toponyms, and — inside the
+OF-00-495 footprint — the published OF01-501 weights-of-evidence contrast for its rock unit.
+All six agents have a knowledge file. **But mapped lithology and structure cover only part of
+the state** (Known Gap #2b), and where they do not, those two agents are back on model prior
+at 0.55 of the gold weight. **Read "Known Gaps" before trusting a score**, and read the
+`coverage` block in the run record for the AOI in front of you — it says which evidence
+actually covered that polygon rather than which artifacts happen to be installed.
 
 ## Scope
 
@@ -34,49 +43,93 @@ currently met on the default dev path.
 Read this first. These are open issues, not TODOs someone will get to — they change how
 you should interpret output today.
 
-### 1. Only 2 of 6 agents have a knowledge file
+### 1. ~~Only 2 of 6 agents have a knowledge file~~ — CLOSED 2026-08-12
 
-`knowledge/` contains exactly `lithology/gold.md` and `historical/gold.md`. There is no
-`default.md` anywhere. The other four agents — **structure, geochemistry, proximity,
-remote_sensing** — call `load_knowledge()`, find nothing, log "No knowledge file", and run
-with **`system=None`**: no system prompt at all.
+All six now have `knowledge/<domain>/gold.md`: `lithology` (21.7 KB), `historical` (36.3 KB),
+`structure` (27.6 KB), `geochemistry` (20.1 KB), `proximity` (19.5 KB), `remote_sensing`
+(16.0 KB). No agent runs with `system=None` for gold, and
+`test_orchestrator_integration.py` asserts `agents_without_knowledge == []` so a file going
+missing again is a test failure rather than a silent quality drop.
 
-Those four carry **0.60 of the gold weight**, structure alone the single highest at 0.30.
-So the majority of every gold composite is ungrounded model prior, scored and displayed
-identically to the grounded 0.40. Nothing in the UI distinguishes them.
+Still true, and still worth knowing: there is no `default.md` anywhere, and **only gold is
+covered**. Ask for silver, copper, uranium or lithium and all six agents fall back to
+`system=None` exactly as before. `resolve_knowledge_path()` looks for
+`<domain>/<mineral>.md` then `<domain>/default.md`, so the cheapest fix for the other four
+minerals is a `default.md` per domain that states what generalises.
 
-### 2. Spatial context is dead in `DEV_MODE`
+### 2. ~~Spatial context is dead in `DEV_MODE`~~ — no longer load-bearing, 2026-08-12
 
-`orchestrator._build_spatial_context()` (defined at `orchestrator.py:214`, called at :131)
-opens a `try` at :246 and imports, in order:
+**The PostGIS query is still dead in dev mode, and that no longer matters**, because it is
+no longer the only source. `_build_spatial_context()` now reads local files first
+(`app.spatial.local_store`) and merges PostGIS on top only where it is reachable. See
+"Local spatial context" under Architecture.
 
-```
-247  from sqlalchemy import select, func
-248  from app.db.session import AsyncSessionLocal      # ← fails here
-249  from app.models.feature import Feature
-```
+The old diagnosis is still accurate about PostGIS itself and worth keeping, because someone
+will eventually want the prod path to work: `db/session.py` calls `create_async_engine()` at
+module scope with a `postgresql+asyncpg://` URL, `asyncpg` is deliberately not in
+`requirements-dev.txt`, so `ModuleNotFoundError` is raised before the `Feature` import on the
+next line ever runs. Adding `geoalchemy2` alone fixes nothing — you need `asyncpg` first,
+then `geoalchemy2`, then a populated database.
 
-Line 248 is the one that blows up: `db/session.py` calls `create_async_engine()` at module
-scope with a `postgresql+asyncpg://` URL, and **`asyncpg` is not in
-`requirements-dev.txt`**. `ModuleNotFoundError` is raised before line 249 runs. The
-`except Exception` at `orchestrator.py:314` swallows it and every agent receives the empty
-context dict the function was initialized with.
+What changed in behaviour:
 
-Note the fix is *not* "add `geoalchemy2`" — line 249 never executes. You need `asyncpg`
-first (and then `geoalchemy2` for line 249, and then a populated database for the query to
-return anything).
+- The failure is logged at INFO as "PostGIS spatial context unavailable … using local files
+  only", not as a warning, because it is the expected dev state.
+- `_error` is set **only when no source produced anything**, so it now means what it says.
+- The `spatial_context` SSE event carries `sources` (which artifacts loaded) and `coverage`
+  (how much of *this* AOI they actually cover). The run record stores both.
 
-The warning it logs is accurate and worth quoting: *"agents will run on LLM regional
-knowledge only."* Every agent prompt has a fallback branch for this case, so the run
-completes and looks normal. `DEV_MODE=true` is the `.env.example` default and `run-dev.sh`
-forces it, so **this is the path you are almost certainly on.**
+### 2b. The 1:24k geology does not cover most of the AOIs we care about — NEW
 
-Combined with (1): on a default dev run, no agent sees database evidence and four of six
-have no domain grounding either.
+This is the significant new gap, and it is a property of the data, not the code.
 
-### 3. Tests exist now, but only for the new machinery
+`WGS_Surface_Geology_24k` is a mosaic of **342 published quadrangles**, not a statewide
+layer, and its holes are badly placed for this project. Measured 2026-08-12 against
+`benchmarks/labels.yaml`, polygon counts within ±0.06° of each AOI centre:
 
-`pytest` is installed and 62 tests pass:
+| AOI | label | 24k polys | 24k structures | OF-00-495 |
+|---|---|---|---|---|
+| monte_cristo | positive | 0 | 0 | — |
+| silver_creek_mineral_city | positive | 0 | 0 | — |
+| sunset_mine_index | positive | 0 | 0 | — |
+| money_creek_miller_river | positive | 0 | 0 | — |
+| sultan_basin | positive | 0 | 0 | — |
+| **nf_snoqualmie_buena_vista** | positive | 0 | 0 | — |
+| **lennox_creek_bear_creek** | positive | 0 | 0 | — |
+| republic_eureka_gulch | positive | 0 | 0 | **`Eck`, contrast 4.55** |
+| puget_lowland_glacial | null | 282 | 16 | — |
+| snoqualmie_batholith_interior | null | 0 | 0 | — |
+| hoh_accretionary_complex | null | 0 | 0 | — |
+
+One of eleven AOIs has 24k coverage, and it is a *null* AOI. Nothing within ~16 km of Monte
+Cristo. The two AOIs marked as the corridor the project is built around have nothing.
+Coverage is concentrated in the Puget lowland: 38,060 of 82,692 polygons sit in the
+-122° longitude band, 1,862 in -118°.
+
+Consequences, in order:
+
+1. **NE Washington is covered instead by OF-00-495**, which is the better source there
+   anyway — it is the only dataset keyed to the published OF01-501 unit codes. Republic's
+   centre lands on `Eck`, the highest-contrast unit in the study (4.55). `structure_agent`
+   falls back to the OF-00-495 fault raster where 24k has no trace to measure, and 32 of 57
+   cells in a Republic AOI get a fault from it.
+2. **Western Washington still has no mapped lithology or structure.** For the priority
+   corridor, those two agents are back on model prior — 0.55 of the gold weight. The
+   occurrence, district, IAML and toponym evidence *is* statewide and does cover it, so
+   those AOIs are far better served than before, just not on geology.
+3. The obvious fix is WA DNR's **1:100,000 statewide surface geology**, a different
+   download that is not in `data/raw/`. `macrostrat.py` is a working connector and could
+   fill the same gap live, at lower resolution.
+
+None of this is silent. `coverage` in the `spatial_context` event and
+`inputs.spatial_coverage` in the run record report per-AOI polygon, structure, WofE,
+occurrence and per-cell counts, and `local_store` logs a warning naming the mosaic when an
+AOI falls in a hole. "The geology store is installed" and "this AOI has mapped geology" are
+different claims and the code keeps them apart.
+
+### 3. Tests — `engine.py`'s maths is covered now
+
+`pytest` is installed and **159 tests pass**:
 
 ```bash
 .venv/bin/python -m pytest backend/tests -q
@@ -90,10 +143,23 @@ the real `coords.ts` under `node --experimental-strip-types` and compares agains
 pyproj, so the map and the backend cannot silently disagree about which cell the
 cursor is over).
 
-**`engine.py`'s scoring maths is still uncovered.** The integration test asserts
-the composite is non-degenerate and in range, which is enough to catch the
-all-zero-scores class of bug, but `_weighted_mean` and `normalize_relative` have
-no direct unit tests. That is the highest-leverage unclaimed test work left.
+Added 2026-08-12: `test_engine.py` (`_weighted_mean`, `normalize_relative`,
+`synthesize` — including the uniform-AOI case that must not invent hotspots, the
+tier boundaries at exactly 0.90/0.65/0.35, and the fact that the composite and
+the mean confidence use *different* denominators), `test_local_store.py`
+(metre-not-degree distances, per-cell facts reaching the cache key, the
+`role: "truth"` invariant, graceful degradation when artifacts are absent), and
+`test_field_pins.py` (a Google My Maps KML and a Gaia GPX of the same points
+normalise identically).
+
+`backend/tests/conftest.py` is new and worth knowing about: the suite used to
+import `app` **by accident**, because pytest imports every test module during
+collection and two hand-run scripts happen to do `sys.path.insert` at module
+scope. Renaming either of those would have broken a dozen unrelated tests with a
+`ModuleNotFoundError`. It also exports `PYTHONPATH` so the tests that shell out
+to a subprocess work — `test_grid.py::test_cell_id_is_stable_across_processes`
+had been failing on that for as long as it has existed, contrary to what this
+file used to claim.
 
 Two older standalone smoke scripts are still run by hand and need a live uvicorn:
 
@@ -108,24 +174,53 @@ ungrounded (Known Gap #1) — they will start failing when those are fixed, whic
 
 `npm run lint` still fails (eslint neither installed nor configured); use `npm run typecheck`.
 
-### 3b. Benchmark ground truth is unverified
+### 3b. Benchmark ground truth — real workings now, and a baseline to beat
 
-`benchmarks/labels.yaml` exists and `scripts/benchmark.py` runs, but the file
-carries `verified: false`: every coordinate in it is an approximate district
-centre, not a survey position, and no `known_workings` entry has been filled in.
-The harness deliberately **refuses to report working-percentile or recall@high**
-until that flag flips, because draft coordinates produce confident numbers about
-the wrong cells. Separation, flatness and grounded fraction do not depend on
-point coordinates and are reported.
+**`known_workings` is populated and verified for 8 of 11 AOIs**, derived by
+`scripts/build_labels_workings.py` from `wa_occurrences.geojson` and filtered to
+survey- and topo-grade positions only. `district_centroid`, `variable` and
+`derived` positions are excluded — a district centre in a site's row would anchor
+a confident metric about ground it says nothing about. Gating is per-AOI
+(`workings_verified`), not the global `verified` flag, because these metrics read
+working coordinates and the global flag is about `approx_center`, which remains
+unchecked and is only used to match a run to an AOI.
 
-No control AOIs are selected yet, and no noise floor has been established
-(needs ≥2 runs of one AOI on one clean commit with `CACHE_ENABLED=false`), so no
-benchmark delta can currently be called an improvement.
+**There is now a non-LLM number to beat.** `backend/app/scoring/wofe_baseline.py`
+implements the published OF01-501 model, and `benchmark.py --wofe-only` scores the
+labelled AOIs with no run records and no tokens:
+
+```
+republic_eureka_gulch  2436 cells scored, mean 0.610, sd 0.369
+                       tracts: favourable 1421, permissive 289, non-permissive 726
+                       29/29 known workings located
+                       mean baseline percentile 0.857, 14 in the top decile
+```
+
+That is the bar. A composite that ranks real workings below the 0.857 the
+published statistics achieve is not adding value over a lookup table, and the
+harness now reports Spearman correlation between the LLM composite and the
+baseline so agreement and disagreement are both visible.
+
+**The baseline refuses all ten western Washington AOIs**, because OF01-501 was
+fitted on 50 epithermal training sites in six NE Washington quadrangles and
+extrapolating it would be worse than saying nothing. Every AOI in the priority
+corridor is in that list — so for the ground the project cares most about there is
+still no independent check, only the LLM.
+
+Still open: **no control AOIs are selected** (`labels.yaml` asks for 4–6 — ground
+comparable to the positives that was prospected without result, which is the most
+diagnostic label and the one nobody else can source), and **no noise floor** has
+been established (needs ≥2 runs of one AOI on one clean commit with
+`CACHE_ENABLED=false`), so no LLM delta can yet be called an improvement rather
+than nondeterminism. Also flagged by the label builder and needing a human:
+`snoqualmie_batholith_interior` is labelled `null` but has two survey-grade gold
+workings within 6 km, so the label is suspect rather than the data.
 
 ### 4. Stubs and unused infrastructure
 
 - `blm_mlrs.py` and `glo_records.py` — `fetch()` returns `[]`. Registered and syncable;
-  they just import nothing.
+  they just import nothing. Unpermitted-claims data therefore never reaches the proximity
+  agent, which the knowledge file says so explicitly.
 - **MinIO / boto3** — a compose service, four config settings, and a requirements entry.
   Zero usage in `backend/app`. Object storage is entirely aspirational.
 - **LangGraph** — in `requirements.txt`, imported nowhere. Orchestration is plain
@@ -133,28 +228,30 @@ benchmark delta can currently be called an improvement.
 - `EQUAL_WEIGHTS` in `weights.py` is never referenced; the orchestrator falls back to
   `{}` and `_weighted_mean` defaults each missing agent to 1.0. Same behavior, different
   code path than the one previously documented here.
-- **608 MB of WA DNR geodatabases** sit in `data/raw/` referenced by no code at all.
-  `Gold_Silver_Locations` is now the *blocking* gap for toponym corroboration —
-  see Known Gap #5.
-- No export endpoint exists, in either mode.
+- ~~608 MB of WA DNR geodatabases referenced by no code~~ — **now read.** Three build
+  scripts extract them; see "Local spatial context" under Architecture. Only the `contact`
+  feature class (142,727 lines) is deliberately skipped as too heavy for its marginal value.
+- **No export endpoint exists, in either mode.** Still the largest missing UI capability:
+  a scored grid you cannot get out of the browser is hard to act on in the field.
 
-### 5. No occurrence data on disk, so toponym corroboration is inert
+### 5. ~~No occurrence data on disk, so toponym corroboration is inert~~ — CLOSED 2026-08-12
 
-`data/reference/wa_occurrences.geojson` is not built. The USGS MRDS WFS returns
-**403 to tiled bbox requests**, so the obvious scripted path does not work.
+`data/reference/wa_occurrences.geojson` is built (4.2 MB, 3,314 features) from the WA DNR
+geodatabase rather than from MRDS, so the MRDS **403 on tiled bbox requests** is irrelevant
+to it. `local_store` passes the occurrence list into `toponyms_for_cells(...,
+occurrences=...)`, so `_corroborate()` now returns real corroborated/uncorroborated verdicts
+and `score_cap_for()` stops applying the uncorroborated cap to everything.
 
-Consequence: `toponyms.matcher._corroborate()` runs, but with an empty
-occurrence list every hit comes back `corroboration: "unknown"` rather than
-corroborated/uncorroborated, and `score_cap_for()` therefore applies the
-uncorroborated cap to everything. The single highest-value step in the toponym
-workstream — "is there a recorded occurrence near this name?" — is wired and
-untested against real data.
+The WA DNR source turned out to be better than MRDS for more than availability — see
+"Local spatial context" for the `ASSAYS` / `PRODUCTION` / `LOCATION_ACCURACY` fields, which
+converted the assay-primacy rule in `knowledge/historical/gold.md` from an inference the
+model had to make into a lookup.
 
-The better source is already on disk: `Gold_Silver_Locations` and
-`Metallic_Mineral_Occurences` in the WA DNR geodatabase under `data/raw/`. A
-couple of hours of `ogr2ogr` would produce the file and light this up. The
-`Known occurrences` layer toggle in the map's layer panel is greyed out until
-it exists — `/reference/layers` reports which overlays are actually built.
+`usgs_mrds.py` was also fixed while nearby, and it was worse than documented: `typeName=mrds`
+does not exist on that service (it publishes `ms:mrds-high`), so `fetch()` was raising a JSON
+decode error on *every* call rather than silently truncating — the missing pagination was the
+second bug hiding behind the first. The service serves GML only, and Washington alone holds
+16,499 records against the old `maxFeatures=1000` ceiling. See that module's docstring.
 
 ---
 
@@ -204,8 +301,90 @@ Phase 3 — Multi-Agent Analysis
 | Persistence | `data/runs/*.json` + `data/cache/cells.sqlite` (both modes) | also `analysis_jobs` table |
 | `/channels`, `/features` | **404** — ChannelDashboard tab is broken | working |
 | `/cache/*`, `/reference/*` | working — they read files, not Postgres | working |
-| Spatial context | fails, agents get empty context (Known Gaps #2) | works if the DB is populated |
+| Spatial context | **local files (works)**; PostGIS merge fails and is logged at INFO | local files, plus PostGIS if populated |
 | Stop / cancel | working — client aborts the fetch, generator polls `is_disconnected()`, task is cancelled | **not wired** — no cancel endpoint for the Celery path |
+
+### Local spatial context — how evidence reaches the agents
+
+`backend/app/spatial/` is the agents' evidence base. It exists because the honest
+description of a run used to be *"Claude scoring grid cells from a 50 KB prose briefing"*:
+`_build_spatial_context()` only ever tried PostGIS, that query dies on the dev path, and
+every agent received an empty dict.
+
+**Files, not a database.** `sqlite3`, `json` and `shapely` against artifacts on disk, so it
+works identically in both modes. Everything is optional — a missing artifact costs a line in
+a prompt and a greyed-out map toggle, never a traceback. `data/derived/` is gitignored, so
+absent is the fresh-clone default.
+
+**Per-cell, not AOI-wide.** This is the substantive change. The old context keys were flat
+lists for the whole AOI, which asked the model to do the spatial join itself from a JSON blob
+and a list of cell centres. It cannot do that reliably, and when it fails it fails silently —
+by smearing one district's evidence across every cell in the polygon. The join now happens in
+Python. `cell_facts[cell_id]` carries, per cell:
+
+| key | contents | from |
+|---|---|---|
+| `geology` | units under the cell with area fractions, names, ages, lithologies | `wa_geology.sqlite` |
+| `structures` | faults/folds/dikes within the 1,700 m WofE buffer, azimuths folded to [0,180), favourable-trend flag, in-cell fault intersections | `wa_geology.sqlite` |
+| `wofe` | modal + favourable OF-00-495 unit, published contrast, fault/fold/dike codes | `of00495.sqlite` |
+| `occurrences` | counts at 1/2/5 km, nearest and best-documented record, assay/production counts | `wa_occurrences.geojson` |
+| `district` | district membership with production figures, and distance if just outside | `wa_mining_districts.geojson` |
+| `workings` | IAML adits, shafts, dumps within 5 km | `wa_iaml.geojson` |
+| `toponyms` | lexicon hits with corroboration verdicts | `gnis_wa.tsv` + lexicon |
+| `field_observations` | **`role: "evidence"` pins only** | `data/user_sites/` |
+
+`base_agent.cell_facts_block()` renders one line per cell against the batch labels
+(`c1`, `c2`, …). Cells with nothing get `no data` rather than being omitted: an absent line
+reads as an oversight, and a model filling a perceived gap with a plausible guess is the
+behaviour this exists to stop.
+
+**Distances are metres.** `spatial/geometry.LocalMetric` projects into a local
+equirectangular metre frame pinned to the AOI centre. Degrees would rank north–south
+neighbours ~1.4× further away than east–west ones at equal true distance; EPSG:5070 is
+equal-*area* and distorts local distance by position. `matcher._km_between` now delegates
+here so there is exactly one definition of distance in the codebase. Distances are measured
+from the **cell polygon**, so 0 km means "inside this cell".
+
+**What the WA DNR fields bought.** `ASSAYS` and `PRODUCTION` are explicit per-site flags
+(649 and 450 of 1,467 gold/silver records), so the assay-primacy rule is a lookup rather than
+an inference. `LOCATION_ACCURACY` is mapped to an `accuracy_class`, and the prompts act on
+it: **917 of 1,467 records are "coordinate accuracy highly variable" and 24 are mining
+district centroids**, so a `district_centroid` record is passed to the model explicitly
+labelled as having no site position and is barred from anchoring a distance argument. The map
+styles by the same field — an approximate location must not be drawn as a crisp dot.
+
+**Novelty.** `orchestrator._attach_novelty()` puts `nearest_occurrence_km` and
+`novelty` ∈ {`confirms`, `extends`, `lead`} on every scored cell (≤0.5 km / ≤2 km / beyond).
+This is the point of putting known workings on the map: a hot cell on three recorded workings
+is the model confirming known ground, and a hot cell with nothing recorded within two miles
+is a lead. On a plain choropleth those look identical and mean opposite things. `novelty is
+None` means **unknown**, not novel, and the UI renders nothing for it — with no occurrence
+extract built, calling every cell a lead would turn a missing file into a prospecting signal.
+
+**Cache correctness.** `BaseAgent._cell_context()` had to change: `cell_facts` is a dict and
+the old implementation kept only list and str values, so per-cell evidence would have been
+invisible to the cache key and every cell would have gone on serving the score it got before
+it had any evidence. `test_local_store.py` pins this.
+
+**The role invariant.** A `role: "truth"` field pin never reaches a prompt.
+`load_user_sites()` defaults `roles=("evidence",)` so a caller that forgets to filter gets
+the safe answer, `local_store._user_pins()` re-checks, and the run record logs
+`pin_roles_active` so it can be audited after the fact. If the model is told "someone marked
+this spot" and the benchmark then asks whether it ranked that spot highly, the answer is yes
+by construction.
+
+Building the artifacts (all read `data/raw/`, all idempotent):
+
+```bash
+.venv/bin/python scripts/build_reference_extracts.py all   # → data/reference/*.geojson
+.venv/bin/python scripts/build_geology_store.py            # → data/derived/wa_geology.sqlite
+.venv/bin/python scripts/build_of00495.py                  # → data/derived/of00495.sqlite
+.venv/bin/python scripts/import_field_pins.py --help       # → data/user_sites/*.geojson
+```
+
+`GET /reference/layers` reports which exist, including `geology_store` and `wofe_store`,
+which are not overlays — they back the per-cell evidence and the run log needs to be able to
+say whether they were present.
 
 ### SSE event contract
 
@@ -218,7 +397,7 @@ in the `default` branch as "Unhandled event".
 |---|---|---|
 | `started` | orchestrator | `job_id` |
 | `grid_info` | orchestrator | display/analysis resolution, cell count (only when coarsened) |
-| `spatial_context` | orchestrator | per-domain record `counts`, plus `error` when the PostGIS query failed |
+| `spatial_context` | orchestrator | per-domain record `counts`, `sources` (artifacts loaded), `coverage` (what covers *this* AOI), `cells_with_facts`, plus `error` when no source produced anything |
 | `agent_started` | orchestrator | `agent_id` |
 | `agent_grounding` | **agent** | `knowledge_file` (null ⇒ ran with `system=None`), `knowledge_chars` |
 | `batch_started` | **agent** | batch index/count, cell count, prompt chars |
@@ -275,19 +454,29 @@ prospector-ai/
 │       │   ├── remote_sensing_agent.py
 │       │   ├── historical_agent.py
 │       │   └── knowledge/           ← per-domain, per-mineral domain knowledge (markdown)
-│       │       ├── lithology/       ← ONLY gold.md — see Known Gaps #1
-│       │       │   └── gold.md      ← WA gold favorability by lithology (epithermal/orogenic/skarn)
-│       │       └── historical/      ← ONLY gold.md
-│       │           └── gold.md      ← WA gold districts, production, claims/GLO interpretation
-│       │       (no structure/, geochemistry/, proximity/, remote_sensing/, no default.md)
+│       │       ├── lithology/gold.md      ← WA gold favorability by lithology + OF01-501 contrasts
+│       │       ├── historical/gold.md     ← districts, production, assay-primacy keyed to DNR flags
+│       │       ├── structure/gold.md      ← 1,700 m buffer, 345-030° trend, mapping-intensity caveat
+│       │       ├── geochemistry/gold.md   ← no-samples IS the primary path; mineralogy as proxy
+│       │       ├── proximity/gold.md      ← distance bands, position discipline, own circularity
+│       │       └── remote_sensing/gold.md ← PREDICTED alteration only; confidence ceiling 0.3
+│       │       (gold only — no default.md, so other minerals still run system=None)
 │       ├── knowledge/toponyms/       ← versioned lexicons, hashed into run provenance
 │       │   └── gold_wa.yaml          ← 5 tiers, incl. a MEASURED anti-signal list
+│       ├── spatial/                  ← THE AGENTS' EVIDENCE BASE — files, never PostGIS
+│       │   ├── geometry.py           ← LocalMetric: the one definition of distance
+│       │   ├── occurrences.py        ← WA DNR mines + ASSAYS/PRODUCTION/accuracy, districts, IAML
+│       │   ├── geology.py            ← 1:24k units/faults/folds/dikes (342-quad mosaic, has holes)
+│       │   ├── wofe_grid.py          ← OF-00-495 on the ladder + published OF01-501 contrasts
+│       │   ├── user_sites.py         ← field pins; enforces "a truth pin never reaches a model"
+│       │   └── local_store.py        ← build_local_context() → per-cell facts + coverage
 │       ├── toponyms/matcher.py       ← deterministic GNIS matcher, stream-aware, capped
 │       ├── runs/record.py            ← RunRecorder: provenance, inputs, outputs, raw LLM
 │       ├── cache/cell_cache.py       ← SQLite per-cell score cache
 │       ├── connectors/              ← data source integrations
 │       │   ├── base_connector.py    ← abstract base: fetch(bbox), normalize(raw)
-│       │   ├── usgs_mrds.py         ← USGS MRDS via WFS — WORKING (no pagination, 1000 cap)
+│       │   ├── usgs_mrds.py         ← USGS MRDS via WFS — FIXED: real typeName, GML, paginated
+│       │   ├── wa_dnr_minerals.py   ← WA DNR ArcGIS REST, paginated; for REFRESH, not the request path
 │       │   ├── usgs_ngdb.py         ← USGS Geochemical DB — WORKING, typeName unverified
 │       │   ├── macrostrat.py        ← Macrostrat geology formations — WORKING
 │       │   ├── mindat.py            ← MinDat.org localities — WORKING (needs MINDAT_API_KEY)
@@ -345,13 +534,22 @@ prospector-ai/
 ├── benchmarks/
 │   ├── labels.yaml                  ← ground truth — verified: FALSE, see Known Gaps #3b
 │   └── baselines/                   ← frozen benchmark results to diff against
-├── scripts/
+├── scripts/                         ← everything here is offline and idempotent
+│   ├── lib/e00.py                   ← pure-Python ArcInfo E00 GRID reader (no GDAL needed)
+│   ├── build_reference_extracts.py  ← WA DNR mines/districts/IAML → data/reference/*.geojson
+│   ├── build_geology_store.py       ← 24k surface geology → data/derived/wa_geology.sqlite
+│   ├── build_of00495.py             ← OF-00-495 grids → data/derived/of00495.sqlite
+│   ├── import_field_pins.py         ← KML/KMZ/GPX/GeoJSON → data/user_sites/, with roles
 │   ├── benchmark.py                 ← offline harness over data/runs/
 │   ├── build_gnis_extract.py        ← builds data/reference/gnis_wa.tsv
-│   ├── convert_of00_495.sh          ← GDAL-in-Docker .e00 → GeoTIFF/EPSG:4326 conversion
+│   ├── convert_of00_495.sh          ← GDAL-in-Docker .e00 → GeoTIFF (superseded by lib/e00.py)
 │   └── extract_pdfs.py              ← PDF triage + text extraction for docs/intake_analyses/
-├── data/                            ← see data/README.md; raw/ is gitignored and UNUSED by code
-│   ├── reference/                   ← tracked: gnis_wa.tsv, wa_wilderness.geojson
+├── data/                            ← see data/README.md; raw/ is gitignored, now READ by scripts/
+│   ├── reference/                   ← tracked, map-servable: gnis_wa.tsv, wa_wilderness.geojson,
+│   │                                  wa_occurrences.geojson, wa_mining_districts.geojson, wa_iaml.geojson
+│   ├── derived/                     ← gitignored, machine-built: wa_geology.sqlite, of00495.sqlite
+│   ├── user_sites/                  ← gitignored: imported field pins (somebody's own GPS positions)
+│   ├── literature/                  ← gitignored: the 28 source PDFs, extracted from the archive
 │   ├── runs/                        ← gitignored: one JSON per analysis
 │   └── cache/cells.sqlite           ← gitignored: per-cell score cache
 ├── tileserver/config.yaml           ← Martin; serves exactly one table (public.features)
@@ -390,6 +588,16 @@ prospector-ai/
 
 Do **not** override `parse_llm_response()`. The shared implementation handles all six
 agents, including the truncated-JSON repair; overriding it loses that.
+
+**Consume per-cell facts, not the AOI-wide lists.** The AOI-wide keys
+(`geology_units`, `known_deposits`, …) are regional orientation and are capped at 40 records;
+the evidence is `spatial_context["cell_facts"][cell_id]`. Write a module-level
+`_render(facts) -> Optional[str]` for your domain and pass it to
+`base_agent.cell_facts_block(...)`, which handles the batch labelling and emits `no data` for
+cells your domain knows nothing about. Return `None` from `_render` for those cells rather
+than a hedge — a rendered guess is indistinguishable from evidence once it is in the prompt.
+Add whatever your domain needs to `local_store.build_local_context()`; do not query files from
+inside a prompt builder, which runs once per batch.
 
 `BaseAgent.run()` takes an optional `emit_fn` and emits `agent_grounding`, `batch_started`,
 `batch_complete`, and `batch_failed` for you — a new agent gets run-log telemetry for free
@@ -469,6 +677,10 @@ AgentResult(
             tier="high|medium|low|negligible",
             # set by grid.interpolate_to_fine_grid() on IDW-downscaled cells:
             parent_cell_id="col_row",   # analysis cell this display cell inherited from
+            # set by orchestrator._attach_novelty():
+            nearest_occurrence_km=0.42,
+            nearest_occurrence_name="Copper Key",
+            novelty="confirms",         # confirms | extends | lead | None
         )
     ],
     agent_notes="optional summary string",
@@ -478,6 +690,14 @@ AgentResult(
 
 `confidence=0.0` is load-bearing: it is how a cell the LLM skipped is distinguished from a
 cell the LLM scored as genuinely poor. Never let a parse failure emit `confidence>0`.
+
+`novelty=None` is load-bearing in the same way: it means **unknown**, not novel. With no
+occurrence extract built there is nothing to measure distance against, and rendering "lead"
+in that case would convert a missing file into a prospecting signal. The UI must draw nothing
+for `None`. Score and novelty are also separate visual channels by design — novelty drives an
+outline treatment, never the fill ramp, because "how good" and "how new" are different
+questions and merging them into one colour answers neither.
+
 The frontend mirror lives in `frontend/src/types/index.ts` and must be kept in sync.
 
 ### Cell IDs are globally anchored — do not reintroduce AOI-relative ones
@@ -582,11 +802,29 @@ same outcome, different path. Don't wire new code to it without also wiring the 
 ```bash
 pip install -r backend/requirements-dev.txt
 cd frontend && npm install && cd ..
+
+# Build the agents' evidence base from data/raw/ — ONE TIME, ~2 min total.
+# Skip this and the run still works, but lithology, structure, historical and
+# proximity fall back to model prior and the map's mine layers stay greyed out.
+.venv/bin/python scripts/build_reference_extracts.py all
+.venv/bin/python scripts/build_geology_store.py
+.venv/bin/python scripts/build_of00495.py
+
 ./run-dev.sh          # forces DEV_MODE=true; starts uvicorn :8000 and vite :5173
 ```
 
 Paste your Anthropic key into the AnalysisPanel field — in this mode the key travels in the
 request body, not from `.env`. The Channels tab will 404 (see the DEV_MODE table above).
+
+Check what the agents can actually see before spending tokens:
+
+```bash
+curl -s localhost:8000/api/v1/reference/layers | python3 -m json.tool
+```
+
+`geology_store` and `wofe_store` false means the derived stores are not built. And note the
+difference between an artifact existing and it covering your AOI — the run log's
+`spatial_context` line reports `coverage` for the polygon you actually drew (Known Gap #2b).
 
 ### Full stack — Docker Compose
 
@@ -619,6 +857,17 @@ open http://localhost:5173          # frontend
 - `VITE_TILESERVER_URL` is **set nowhere**, so the Martin `features-points` layer never
   renders in any configuration. Set it if you want vector tiles.
 - `npm run lint` fails — eslint is neither installed nor configured. Use `npm run typecheck`.
+- **`bbox=` / `mask=` on either WA DNR geodatabase silently returns zero features.** The
+  `.spx` spatial indexes are stale and OGR short-circuits to an empty result with no error, so
+  it is indistinguishable from "no data in this area". The build scripts read whole layers.
+- The 1:24k geology **has holes where you want it most** — no coverage at Monte Cristo,
+  Sultan Basin, Lennox Creek or the North Fork Snoqualmie corridor. Known Gap #2b has the
+  measured table. Do not read an empty `geology` fact as barren ground.
+- There is no `ogr2ogr`, no GDAL CLI, no `geopandas` and no `pandas` in this environment.
+  `pyogrio` (GDAL bundled in the wheel) is the way in, and `pyogrio.read_dataframe` raises
+  because it wants geopandas — use `pyogrio.raw.read`, which returns a **4-tuple**
+  `(meta, _, geometry_wkb, field_data)`.
+- macOS has no coreutils `timeout`. Use `curl --max-time`.
 
 ---
 
@@ -641,11 +890,28 @@ open http://localhost:5173          # frontend
 - Components are functional; hooks for logic
 
 ### Testing
-There is no test suite yet, so "it ran without an exception" is the current bar and it is
-too low — the all-zero-scores bug in `.claude/mistakes-log.md` passed that bar for weeks.
-Until a suite exists, changes to `scoring/engine.py` or `scoring/grid.py` should be
-exercised against a known AOI and the composite values eyeballed. Adding `pytest` +
-`tests/test_engine.py` is the highest-leverage unclaimed task in the repo.
+
+```bash
+.venv/bin/python -m pytest backend/tests -q      # 159 tests, ~30 s, no network, no API key
+```
+
+"It ran without an exception" is no longer the bar — that bar let the all-zero-scores bug in
+`.claude/mistakes-log.md` live for weeks. `scoring/engine.py`, `scoring/grid.py`,
+`spatial/`, the toponym matcher, the cell cache and the run recorder all have direct tests,
+and `test_orchestrator_integration.py` exercises the whole pipeline against a stubbed LLM.
+
+Two conventions in this suite that are load-bearing:
+
+- **Canary tests are inverted, not deleted, when a gap closes.** The integration test used to
+  assert `"structure" in agents_without_knowledge` as a deliberate tripwire on Known Gap #1.
+  When the knowledge file landed it fired, and it was rewritten to assert
+  `agents_without_knowledge == []` — so the gap reopening is still a failure.
+- **A test that finds a bug asserts the current behaviour with a comment, and reports it.**
+  Silently changing `scoring/engine.py` to make a test green is the exact move the mistakes
+  log exists to prevent.
+
+`npm run lint` still fails (eslint neither installed nor configured); use
+`cd frontend && npm run typecheck`.
 
 ### Git
 - Branch per feature: `feature/<slug>` or `fix/<slug>`
@@ -679,6 +945,9 @@ source of truth** — it uses Docker service hostnames (`@postgres:5432`, `redis
 | `SAVE_RUN_RECORDS` | `config.py` | default **true** — one JSON per run in `data/runs/` |
 | `SAVE_RAW_LLM` | `config.py` | default **true** — keep raw responses in the run record |
 | `CACHE_ENABLED` | `config.py` | default **true**. Set false for benchmark noise-floor runs |
+| `LOCAL_CONTEXT_ENABLED` | `config.py` | default **true**. Set false to reproduce the old "LLM regional knowledge only" runs — the honest way to measure what the data actually adds |
+| `OCCURRENCE_SEARCH_RADIUS_KM` | `config.py` | default **5.0**. Also the radius beyond which a cell is called a `lead` rather than a re-find |
+| `MAX_RECORDS_PER_CELL` | `config.py` | default **6**. Bounds prompt size: a cell in the Republic district can have dozens of occurrences and the marginal ones do not move the score |
 | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | `config.py` | **declared and read by nothing.** No boto3/S3 code exists in `backend/app`. |
 | `POSTGRES_HOST/PORT/DB/USER/PASSWORD` | `docker-compose.yml` only | absent from `config.py` |
 | `AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY/ENDPOINT_URL` | **nothing** | absent from `config.py` |
@@ -720,30 +989,59 @@ Definitions live in `.claude/commands/`.
 
 ## Static Reference Datasets
 
-**None of these are wired into the application.** ~608 MB sits in `data/raw/` (gitignored)
-that no module reads — grepping `backend/` and `frontend/src` for
-`of00|ger_portal|surface_geology|mines_minerals` returns zero hits. The only code that
-touches these paths is `scripts/convert_of00_495.sh`, an offline conversion step. Full
-provenance in `data/README.md`.
+**These are now read** — by the three offline build scripts, never at request time. Full
+provenance in `data/README.md`. Reading them needs `pyogrio` (bundles GDAL; there is no
+`ogr2ogr` and no Docker on a plain macOS box); the runtime needs only `sqlite3` and `shapely`
+against their output.
 
-- **WA DNR / WGS Mines & Minerals** (~77 MB) — ESRI File Geodatabase. Feature classes
-  include `Gold_Silver_Locations`, `Metallic_Mineral_Occurences`, `Mining_Districts_WA`,
-  `IAML_Sites`. This is the highest-value unused asset in the repo: statewide, WA-authored,
-  and directly comparable to what MRDS already provides at lower positional accuracy.
-- **WA DNR / WGS Surface Geology 1:24k** (~218 MB) — `geologic_unit_poly`, `fault`, `fold`,
-  `dike`, `contact` statewide. Would ground the structure agent, which currently has neither
-  a knowledge file nor data.
-- **USGS Open-File Report 00-495** (Boleneus & Causey 2000) — *Geologic raster data
-  for weights-of-evidence analysis in NE Washington.* Covers the six 1:100,000
-  quadrangles (Colville, Chewelah, Republic, Nespelem, Omak, Oroville) — i.e. the
-  heart of WA gold country. Four ArcInfo GRID layers: `newageol` (lithology, 50 m),
-  `newafold` (folds, 50 m), `newafaul` (faults, 100 m), `newadike` (dikes, 200 m).
-  Native CRS is UTM 11N / NAD27 (EPSG:26711) — must be reprojected to EPSG:4326.
-  Full integration plan, conversion path, and proposed knowledge-JSON structure
-  are in `docs/04_usgs_of00_495_dataset.md`. When implemented, the loader lives at
-  `backend/app/connectors/usgs_of00_495.py` (one-time load, not a recurring sync).
-  `scripts/convert_of00_495.sh` — the GDAL-in-Docker `.e00` → EPSG:4326 conversion — is
-  already written and working; only the loader is missing.
+One trap worth knowing before you touch either geodatabase: **`bbox` / `mask` spatial
+push-down returns zero features on both of them** — the `.spx` indexes are stale, and OGR
+short-circuits to an empty result rather than erroring. It looks exactly like "no data here".
+The build scripts read whole layers for that reason.
+
+- **WA DNR / WGS Mines & Minerals** (~77 MB) → `data/reference/*.geojson`.
+  `Gold_Silver_Locations` (1,467), `Metallic_Mineral_Locations` (1,847),
+  `Mining_Distircts_WA` (68 — the typo in the layer name is real), `IAML_Sites` (97),
+  `IAML_Features` (359), and `Metallic_Minerals_Scanned_Documents` (107,739 rows joining
+  sites to scanned source literature). Was the highest-value unused asset in the repo; the
+  `ASSAYS` / `PRODUCTION` / `LOCATION_ACCURACY` fields are why it beats MRDS here.
+- **WA DNR / WGS Surface Geology 1:24k** (~218 MB) → `data/derived/wa_geology.sqlite`
+  (82,692 unit polygons, 12,416 faults, 3,350 folds, 2,467 dikes, 107 vents, 2,184 unit
+  descriptions; `contact`'s 142,727 lines deliberately skipped). **A 342-quadrangle mosaic,
+  not a statewide layer — read Known Gap #2b before relying on it.** Its unit labels are
+  quad-local (`Evs(t)`, `Ev(p)`) and do **not** match the OF01-501 WofE codes; all six of
+  `Evsf`, `Evst`, `Eck`, `Evkct`, `Evkf`, `Eco` are absent from its 2,186 distinct values, so
+  do not try to match them by string similarity. It will look like it works.
+- **USGS Open-File Report 00-495** (Boleneus & Causey 2000) — *Geologic raster data for
+  weights-of-evidence analysis in NE Washington* → `data/derived/of00495.sqlite`
+  (395,605 rows on 250 m cells of the fixed grid). Covers the six 1:100,000 quadrangles
+  (Colville, Chewelah, Republic, Nespelem, Omak, Oroville) — the heart of WA gold country,
+  and precisely where the 24k geology is thinnest. Four ArcInfo GRID layers: `newageol`
+  (lithology, 50 m), `newafold` (folds, 50 m), `newafaul` (faults, 100 m), `newadike`
+  (dikes, 200 m). Native CRS UTM 11N / NAD27 (EPSG:26711).
+
+  **This is the only dataset on disk keyed to the published OF01-501 contrasts**, because its
+  value-attribute tables carry the standardised Appendix A-1 labels. Favourable-unit cell
+  counts as built: `Evsf` 10,554, `Evkf` 3,405, `Eco` 1,145, `Evkct` 464, `Eck` 427,
+  `Evst` 274; 21,400 cells carry a fault code.
+
+  Read by `scripts/lib/e00.py`, a pure-Python E00 GRID parser — the files are ASCII, five
+  fixed-width integers per line, exactly `ncols × nrows` values terminated by `EOG`, with the
+  VAT in the trailing `IFO` section. It asserts the value count and fails loudly, because a
+  silent off-by-one there would shift every cell's geology by one pixel. This supersedes
+  `scripts/convert_of00_495.sh` (GDAL-in-Docker), which still works but needs Docker.
+
+  The fault and fold rasters are **sparse presence layers**, and their `.e00` VATs carry only
+  VALUE and COUNT with empty labels — so the codes look opaque if you only read the raster.
+  **They are not:** Appendices B-1 and B-2 of `of00-495.pdf` define every one, and
+  `wofe_grid.FAULT_CODES` / `FOLD_CODES` transcribe them (7–10 thrust, 31/33 low-angle normal,
+  43–45 normal; folds 1–3 anticline through 31–33 monocline). This distinction decides scores:
+  the OF01-501 predictor is specifically a **normal** fault, a thrust is Mesozoic contraction
+  pre-dating the Eocene ore event, and a low-angle normal fault is a core-complex detachment
+  rather than a steep vein conduit. What the raster genuinely cannot give you is **orientation**
+  — so the 345°–030° half of the OF01-501 rule is inapplicable there, and the prompt says so
+  rather than letting the model assume the favourable case. Design notes in
+  `docs/04_usgs_of00_495_dataset.md`.
 
 ---
 
@@ -752,13 +1050,15 @@ provenance in `data/README.md`.
 Track progress in `docs/03_implementation_plan.md`.
 
 - [x] **M1: Running scaffold** — 7 compose services defined; `run-dev.sh` boots without Docker
-- [~] **M2: First data flowing** — 4 connectors fetch live; the Martin tile layer never renders
-      because `VITE_TILESERVER_URL` is unset, and `/features` 404s under DEV_MODE
-- [~] **M3: Full data layer** — 4 of 6 connectors real, `blm_mlrs` + `glo_records` are stubs;
-      no loader for the 608 MB of local WA DNR / USGS data
-- [~] **M4: Scoring foundation** — grid rewritten onto a fixed, globally-anchored
-      quadtree and covered by tests; `engine.py`'s weighted mean and relative
-      normalization still have no direct unit tests (Known Gaps #3)
+- [~] **M2: First data flowing** — **local data now reaches the agents** (`app/spatial/`);
+      live connectors still only reachable on the prod path, the Martin tile layer never
+      renders because `VITE_TILESERVER_URL` is unset, and `/features` 404s under DEV_MODE
+- [~] **M3: Full data layer** — all 608 MB of local WA DNR / USGS data is loaded and served;
+      `usgs_mrds` fixed; `wa_dnr_minerals` added for refresh. Still missing: `blm_mlrs` +
+      `glo_records` are stubs, no geochemical sample source on disk, and no mapped geology
+      west of the crest (Known Gap #2b)
+- [x] **M4: Scoring foundation** — fixed, globally-anchored quadtree grid; `engine.py`'s
+      weighted mean and relative normalization now have direct unit tests
 - [x] **M5: First end-to-end analysis** — full job runs draw → agents → synthesis → grid
 - [x] **M6: Full UI** — draw → run → results → evidence drawer, plus Relative/Absolute
       toggle, Past Runs, and the RunLog console (live token/cost ledger, per-batch event
@@ -772,7 +1072,25 @@ Track progress in `docs/03_implementation_plan.md`.
 
 ---
 
-*Last updated: 2026-08-01 (second pass) — implemented Workstreams A, B and C of
+*Last updated: 2026-08-12 — **connected the data to the agents.** The 608 MB in `data/raw/`
+had never been read by any code, `_build_spatial_context()` died on the `asyncpg` import on the
+only path anyone runs, and four of six agents had no knowledge file — so every score was model
+prior plus a 50 KB markdown briefing. Now: three offline build scripts extract the WA DNR mines
+and 1:24k geology geodatabases and the USGS OF-00-495 grids (the last via a pure-Python E00
+reader, no GDAL); `app/spatial/` assembles them into **per-cell** evidence read straight off
+disk, so the spatial join happens in Python instead of in the model's head; all six agents have
+a gold knowledge file; the WA DNR `ASSAYS`/`PRODUCTION`/`LOCATION_ACCURACY` fields turned the
+assay-primacy rule from an inference into a lookup; toponym corroboration works for the first
+time; known mines and districts are on the map with uncertainty halos scaled to each record's
+positional accuracy; every scored cell carries a `novelty` flag so a re-discovery is
+distinguishable from a lead; field pins import from KML/GPX with a `role` field that keeps
+`truth` pins away from the model. 62 tests → 161. Known Gaps #1 and #5 closed, #2 defanged, #3
+closed. **New Known Gap #2b**, and it is the important one: the 1:24k geology is a
+342-quadrangle mosaic and covers exactly one of the eleven benchmark AOIs, so west of the crest
+lithology and structure are still ungrounded — but the run now says so instead of looking
+normal.*
+
+*Previously, 2026-08-01 (second pass) — implemented Workstreams A, B and C of
 "steps for raghav". Grid rewritten onto fixed EPSG:5070 cell ids with a nesting
 resolution ladder; run records, a SQLite cell cache and an offline benchmark
 harness added; USGS basemaps, orientation controls, a layer panel and reference
