@@ -1,13 +1,21 @@
 # Benchmark ground truth.
 #
-# ⚠ DRAFT — NOT YET USABLE AS GROUND TRUTH.
+# ⚠ PARTIALLY VERIFIED. Read which half before trusting a number.
 #
-# Every coordinate below is an approximate district centre taken from general
-# reference, not a surveyed position, and no `known_workings` entry has been
-# verified. Until Matthew checks these against WA DNR MRDS /
-# `Gold_Silver_Locations` and the historical literature in
-# docs/intake_analyses/, `scripts/benchmark.py` will refuse to report
-# working-percentile or recall metrics and will say why.
+# `approx_center` — STILL UNVERIFIED. Every one is an approximate district centre
+# taken from general reference, not a surveyed position. It is used only to decide
+# which run belongs to which AOI, so an error of a kilometre is tolerable there and
+# fatal nowhere. The global `verified` flag below refers to these and stays false
+# until Matthew checks them.
+#
+# `known_workings` — VERIFIED for 8 of 11 AOIs, as of 2026-08-13. Derived
+# programmatically from data/reference/wa_occurrences.geojson (WA DNR / WGS Mines &
+# Minerals) and filtered to survey- and topo-grade positions only; district_centroid,
+# variable and derived positions are excluded. That filtering *is* the check the
+# original header asked for. Per-AOI `workings_verified` gates the working-percentile
+# and recall@high metrics — not the global flag — because those metrics read working
+# coordinates, not AOI centres. See the status block below and `workings_provenance`
+# at the foot of the file.
 #
 # Labels:
 #   positive  documented workings, production, or assayed occurrences
@@ -22,8 +30,22 @@
 # place names themselves. Those are excluded from the primary metrics — see
 # §23 and the --disable-toponyms discussion in the benchmark report.
 
-version: "2026-08-01-draft"
+version: "2026-08-13-workings"
 verified: false          # ← Matthew sets this to true after checking coordinates
+
+# >>> build_labels_workings status block (regenerated; do not edit)
+# Regenerated 2026-08-13 by scripts/build_labels_workings.py.
+#
+# 8 of 11 AOIs have `workings_verified: true`. Filter rules,
+# source hash and per-AOI counts are in `workings_provenance` at the foot of
+# this file; re-run the script to refresh both blocks.
+#
+# LABEL CONFLICTS — a human needs to look at these. Each is an AOI
+# labelled `null` or `control` that nonetheless contains survey- or
+# topo-grade gold workings. The workings are real, so it is the label
+# that is suspect; `workings_verified` is false for them.
+#   - snoqualmie_batholith_interior (label: null) has 2 survey/topo gold working(s) within 6.0 km, nearest 5.81 km (Condor-Hemlock)
+# <<< end build_labels_workings status block
 
 aois:
   # --- Positives ---------------------------------------------------------
@@ -35,8 +57,13 @@ aois:
     notes: >
       Named in knowledge/historical/gold.md; significant historical production.
       Toponym-revealing, so excluded from the headline metric.
-    known_workings: []           # TODO(Matthew): Pride of the Mountains, Mystery, etc.
+    # previously: known_workings: []           # TODO(Matthew): Pride of the Mountains, Mystery, etc.
     expect: "known_working cells in top decile of AOI"
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: mm-572, name: Mackinaw, lon: -121.442037, lat: 47.981437, accuracy_class: topo, assays: true, production: true, distance_km: 5.37, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: mm-606, name: Sunrise, lon: -121.503482, lat: 48.00867, accuracy_class: topo, assays: true, production: false, distance_km: 5.28, source_layer: Metallic_Mineral_Locations}
 
   silver_creek_mineral_city:
     label: positive
@@ -44,7 +71,14 @@ aois:
     approx_center: [-121.35, 47.95]
     toponym_revealing: true
     notes: "Adjacent to Monte Cristo, separate workings."
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: gs-1494, name: Monte Cristo, lon: -121.368634, lat: 47.981134, accuracy_class: survey, assays: true, production: true, distance_km: 3.71, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-1475, name: Justice, lon: -121.379107, lat: 47.979873, accuracy_class: survey, assays: true, production: true, distance_km: 3.95, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-1505, name: Rainy, lon: -121.38894, lat: 47.986778, accuracy_class: topo, assays: true, production: true, distance_km: 5.0, source_layer: Gold_Silver_Locations}
+      - {site_uid: mm-591, name: O and B, lon: -121.40264, lat: 47.984178, accuracy_class: topo, assays: true, production: true, distance_km: 5.45, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: gs-1402, name: Ajax, lon: -121.384815, lat: 47.975106, accuracy_class: topo, assays: false, production: false, distance_km: 3.8, source_layer: Gold_Silver_Locations}
 
   sunset_mine_index:
     label: positive
@@ -52,21 +86,35 @@ aois:
     approx_center: [-121.57, 47.83]
     toponym_revealing: false
     notes: "Index granodiorite contact setting. Blandly named — good AOI."
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: mm-501, name: Copper Belle, lon: -121.613126, lat: 47.848595, accuracy_class: topo, assays: true, production: true, distance_km: 3.82, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: mm-564, name: Lake Serene, lon: -121.580782, lat: 47.792684, accuracy_class: topo, assays: true, production: true, distance_km: 4.2, source_layer: Metallic_Mineral_Locations}
 
   money_creek_miller_river:
     label: positive
     county: King
     approx_center: [-121.40, 47.70]
     toponym_revealing: false
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: mm-10, name: Great Republic, lon: -121.400043, lat: 47.698548, accuracy_class: topo, assays: true, production: true, distance_km: 0.16, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: mm-9, name: Grand Central, lon: -121.428651, lat: 47.707414, accuracy_class: topo, assays: true, production: true, distance_km: 2.3, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: gs-3002, name: Seattle-Cascade, lon: -121.418209, lat: 47.668298, accuracy_class: topo, assays: true, production: true, distance_km: 3.76, source_layer: Gold_Silver_Locations}
+      - {site_uid: mm-256, name: Una, lon: -121.414332, lat: 47.659017, accuracy_class: topo, assays: false, production: true, distance_km: 4.66, source_layer: Metallic_Mineral_Locations}
 
   sultan_basin:
     label: positive
     county: Snohomish
     approx_center: [-121.65, 47.95]
     toponym_revealing: true      # "Sultan" is a tier-2 lexicon term
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: mm-563, name: Kromona, lon: -121.592915, lat: 47.916067, accuracy_class: topo, assays: true, production: true, distance_km: 5.68, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: gs-2121, name: Lockwood Pyrite, lon: -121.716682, lat: 47.962923, accuracy_class: topo, assays: true, production: false, distance_km: 5.17, source_layer: Gold_Silver_Locations}
 
   nf_snoqualmie_buena_vista:
     label: positive
@@ -74,7 +122,10 @@ aois:
     approx_center: [-121.55, 47.65]
     toponym_revealing: false
     notes: "PRIORITY AOI — the corridor the project is built around."
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: gs-993, name: Lenox Mining and Development, lon: -121.573115, lat: 47.652406, accuracy_class: topo, assays: true, production: true, distance_km: 1.75, source_layer: Gold_Silver_Locations}
 
   lennox_creek_bear_creek:
     label: positive
@@ -82,12 +133,19 @@ aois:
     approx_center: [-121.50, 47.68]
     toponym_revealing: false
     notes: "Snoqualmie Batholith contact margin."
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: gs-954, name: Apex, lon: -121.512273, lat: 47.695006, accuracy_class: survey, assays: true, production: true, distance_km: 1.9, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-973, name: Damon and Pythias, lon: -121.526068, lat: 47.698398, accuracy_class: topo, assays: true, production: true, distance_km: 2.82, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-969, name: Coney Basin, lon: -121.461665, lat: 47.652125, accuracy_class: topo, assays: true, production: true, distance_km: 4.21, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-2997, name: Cleopatra, lon: -121.458815, lat: 47.635606, accuracy_class: topo, assays: true, production: true, distance_km: 5.8, source_layer: Gold_Silver_Locations}
 
   # NE Washington. Absent from the original draft list, which was scoped to
   # western WA — but knowledge/historical/gold.md cites Republic more than any
   # other district in the state, so a benchmark without it does not measure the
   # knowledge base the system actually has.
+
   republic_eureka_gulch:
     label: positive
     county: Ferry
@@ -96,7 +154,38 @@ aois:
     notes: >
       Republic graben, epithermal. The single most-cited district in the gold
       knowledge base. UTM zone 11N — see the grid CRS note in scoring/grid.py.
-    known_workings: []
+    radius_km: 6.0
+    workings_verified: true
+    known_workings:
+      - {site_uid: gs-928, name: Quilp, lon: -118.748286, lat: 48.658025, accuracy_class: survey, assays: true, production: true, distance_km: 1.08, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-891, name: Flag Hill, lon: -118.754706, lat: 48.652114, accuracy_class: topo, assays: true, production: true, distance_km: 1.11, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-943, name: Surprise, lon: -118.748667, lat: 48.659653, accuracy_class: survey, assays: true, production: true, distance_km: 1.24, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-931, name: Republic, lon: -118.745403, lat: 48.637373, accuracy_class: survey, assays: true, production: true, distance_km: 1.45, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-879, name: Black Tail, lon: -118.749561, lat: 48.662498, accuracy_class: survey, assays: true, production: true, distance_km: 1.55, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-890, name: El Caliph, lon: -118.760136, lat: 48.654595, accuracy_class: topo, assays: true, production: true, distance_km: 1.57, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-912, name: Lone Pine, lon: -118.749181, lat: 48.663706, accuracy_class: survey, assays: true, production: true, distance_km: 1.66, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-910, name: Last Chance, lon: -118.746695, lat: 48.665487, accuracy_class: survey, assays: true, production: true, distance_km: 1.78, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-927, name: Princess Maude, lon: -118.747536, lat: 48.634589, accuracy_class: topo, assays: true, production: true, distance_km: 1.79, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-924, name: Pearl, lon: -118.752075, lat: 48.664787, accuracy_class: survey, assays: true, production: true, distance_km: 1.86, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-934, name: San Poil, lon: -118.756614, lat: 48.665106, accuracy_class: topo, assays: true, production: true, distance_km: 2.07, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-878, name: Ben Hur, lon: -118.757842, lat: 48.668942, accuracy_class: survey, assays: true, production: true, distance_km: 2.47, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-945, name: Trade Dollar, lon: -118.76002, lat: 48.669856, accuracy_class: survey, assays: true, production: true, distance_km: 2.64, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-909, name: Knob Hill, lon: -118.757833, lat: 48.673453, accuracy_class: survey, assays: true, production: true, distance_km: 2.91, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-918, name: Mountain Lion, lon: -118.767372, lat: 48.679773, accuracy_class: survey, assays: true, production: true, distance_km: 3.86, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-940, name: South Penn, lon: -118.755761, lat: 48.690178, accuracy_class: survey, assays: true, production: true, distance_km: 4.59, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-944, name: Tom Thumb, lon: -118.7571, lat: 48.696081, accuracy_class: survey, assays: true, production: true, distance_km: 5.25, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-921, name: Old Hickory, lon: -118.742733, lat: 48.639125, accuracy_class: topo, assays: false, production: true, distance_km: 1.22, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-901, name: Ida May, lon: -118.764658, lat: 48.654803, accuracy_class: topo, assays: false, production: true, distance_km: 1.89, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-902, name: Insurgent, lon: -118.74617, lat: 48.6669, accuracy_class: survey, assays: false, production: true, distance_km: 1.92, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-911, name: Little Cove, lon: -118.753206, lat: 48.667184, accuracy_class: topo, assays: false, production: true, distance_km: 2.13, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-920, name: North San Poil Fraction, lon: -118.758731, lat: 48.6667, accuracy_class: topo, assays: false, production: true, distance_km: 2.3, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-1758, name: Alva Stout Placer, lon: -118.774897, lat: 48.648812, accuracy_class: topo, assays: false, production: true, distance_km: 2.57, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-937, name: Seattle, lon: -118.768914, lat: 48.663206, accuracy_class: topo, assays: false, production: true, distance_km: 2.58, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-3888, name: Hermes, lon: -118.744292, lat: 48.656867, accuracy_class: topo, assays: false, production: false, distance_km: 0.82, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-3886, name: Golden Promise, lon: -118.748314, lat: 48.659306, accuracy_class: topo, assays: false, production: false, distance_km: 1.2, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-3889, name: Apex, lon: -118.747064, lat: 48.662878, accuracy_class: topo, assays: false, production: false, distance_km: 1.52, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-935, name: San Poil Fraction, lon: -118.755745, lat: 48.664817, accuracy_class: topo, assays: false, production: false, distance_km: 2.01, source_layer: Gold_Silver_Locations}
+      - {site_uid: gs-3969, name: Burbank Gold Prospect, lon: -118.769614, lat: 48.674506, accuracy_class: topo, assays: false, production: false, distance_km: 3.48, source_layer: Gold_Silver_Locations}
 
   # --- Controls ----------------------------------------------------------
   # TO BE SELECTED BY MATTHEW (§7): ground with comparable elevation, batholith
@@ -104,12 +193,16 @@ aois:
   # without result. Target 4–6.
 
   # --- Nulls -------------------------------------------------------------
+
   puget_lowland_glacial:
     label: "null"
     county: King
     approx_center: [-122.15, 47.45]
     toponym_revealing: false
     notes: "Thick unconsolidated Quaternary cover, no bedrock exposure."
+    radius_km: 6.0
+    workings_verified: false
+    known_workings: []
 
   snoqualmie_batholith_interior:
     label: "null"
@@ -119,6 +212,11 @@ aois:
     notes: >
       Right rock, wrong position. Tests whether the model understands contact
       margins rather than just "granite = good".
+    radius_km: 6.0
+    workings_verified: false
+    known_workings:
+      - {site_uid: mm-3879, name: Condor-Hemlock, lon: -121.360221, lat: 47.496695, accuracy_class: topo, assays: false, production: true, distance_km: 5.81, source_layer: Metallic_Mineral_Locations}
+      - {site_uid: mm-230, name: Clipper, lon: -121.344368, lat: 47.518189, accuracy_class: topo, assays: true, production: false, distance_km: 5.83, source_layer: Metallic_Mineral_Locations}
 
   hoh_accretionary_complex:
     label: "null"
@@ -126,3 +224,57 @@ aois:
     approx_center: [-124.10, 47.75]
     toponym_revealing: false
     notes: "Wrong terrane entirely."
+    radius_km: 6.0
+    workings_verified: false
+    known_workings: []
+
+# >>> build_labels_workings provenance (regenerated; do not edit)
+workings_provenance:
+  generated_at: "2026-08-13T02:19:33Z"
+  generator: scripts/build_labels_workings.py
+  source_file: data/reference/wa_occurrences.geojson
+  source_sha256: 54865dad1f79ab7b1e878c2ca0ba3a8b01f8336b88a6537afbb3418f20cef603
+  source_built_at: "2026-08-13T02:08:38+00:00"
+  source_name: WA_DNR_WGS_Mines_and_Minerals
+  source_layers:
+    - Gold_Silver_Locations
+    - Metallic_Mineral_Locations
+    - Metallic_Minerals_Scanned_Documents
+  source_feature_count: 3314
+  assignment: nearest labelled AOI whose approx_center is within radius_km of the site
+  radius_km_default: 6.0
+  accuracy_classes_accepted:
+    - survey
+    - topo
+  accuracy_classes_excluded:
+    - district_centroid
+    - variable
+    - derived
+    - unknown
+  commodity_filter: "commodity_primary == \"Gold (Au)\" or \"gold\" in commodities"
+  ordering: "production desc, assays desc, distance asc, uid asc"
+  counts:
+    features_read: 3314
+    excluded_by_accuracy: 2724
+    excluded_not_gold: 209
+    candidates: 381
+    assigned: 51
+    unassigned_no_aoi_in_range: 330
+  aois_with_verified_workings:
+    - lennox_creek_bear_creek
+    - money_creek_miller_river
+    - monte_cristo
+    - nf_snoqualmie_buena_vista
+    - republic_eureka_gulch
+    - silver_creek_mineral_city
+    - sultan_basin
+    - sunset_mine_index
+  aois_without_workings:
+    - hoh_accretionary_complex
+    - puget_lowland_glacial
+  label_conflicts:
+    - "snoqualmie_batholith_interior (label: null) has 2 survey/topo gold working(s) within 6.0 km, nearest 5.81 km (Condor-Hemlock)"
+  notes:
+    - "approx_center values are untouched and still unverified; the global `verified` flag stays false."
+    - "working-percentile and recall@high depend on these working coordinates, not on approx_center, which is why they are gated on per-AOI workings_verified instead."
+# <<< end build_labels_workings provenance
