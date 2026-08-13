@@ -33,25 +33,21 @@ data/
     └── of00-495/                       ← USGS OFR 00-495 (NE Washington geology)
 ```
 
-> **Status, 2026-08-12:** all three raw datasets are now read — by the offline build
-> scripts below, never at request time. They are the agents' evidence base; before
-> this, every agent scored from model prior and a markdown briefing.
+> **Status:** all three raw datasets are read — by the offline build scripts, never at
+> request time. They are the agents' evidence base. The build commands and when to run them
+> are in the [root README](../README.md#build-the-evidence-base--one-time-25-min); this file
+> is the reference for what each dataset *is*.
 >
-> ```bash
-> .venv/bin/python scripts/build_reference_extracts.py all   # mines, districts, IAML
-> .venv/bin/python scripts/build_geology_store.py            # 24k geology
-> .venv/bin/python scripts/build_of00495.py                  # NE WA WofE grids
-> ```
+> Reading the geodatabases needs `pyogrio` (in `requirements-dev.txt`; the wheel bundles
+> GDAL, so no `ogr2ogr` or Docker required). The **runtime** needs only `sqlite3` and
+> `shapely` against the outputs, so a deployment can ship `data/derived/` and skip
+> `data/raw/` entirely.
 >
-> Reading the geodatabases needs `pyogrio` (in `requirements-dev.txt`; the wheel
-> bundles GDAL, so no `ogr2ogr` or Docker is required). The **runtime** needs only
-> `sqlite3` and `shapely` against the outputs, so a deployment can ship the derived
-> artifacts and skip `data/raw/` entirely.
->
-> **Trap:** `bbox=` / `mask=` spatial push-down returns **zero features** on both WA
-> DNR geodatabases — the `.spx` indexes are stale and OGR short-circuits to an empty
-> result with no error, which is indistinguishable from "no data here". The build
-> scripts read whole layers for that reason.
+> **Trap:** `bbox=` / `mask=` spatial push-down returns **zero features** on both WA DNR
+> geodatabases — the `.spx` indexes are stale and OGR short-circuits to an empty result with
+> no error, which is indistinguishable from "no data here". The build scripts read whole
+> layers for that reason.
+
 
 ## Datasets
 

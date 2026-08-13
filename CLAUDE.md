@@ -797,57 +797,19 @@ same outcome, different path. Don't wire new code to it without also wiring the 
 
 ## Running the App
 
-### Fastest path — no Docker (what you'll use day to day)
+**Setup, the build-the-evidence-base step, DEV_MODE semantics and the Docker Compose
+commands all live in [`README.md`](README.md).** Do not restate them here — they drifted
+apart twice already. What follows is only what the README has no room for.
 
-```bash
-pip install -r backend/requirements-dev.txt
-cd frontend && npm install && cd ..
-
-# Build the agents' evidence base from data/raw/ — ONE TIME, ~2 min total.
-# Skip this and the run still works, but lithology, structure, historical and
-# proximity fall back to model prior and the map's mine layers stay greyed out.
-.venv/bin/python scripts/build_reference_extracts.py all
-.venv/bin/python scripts/build_geology_store.py
-.venv/bin/python scripts/build_of00495.py
-
-./run-dev.sh          # forces DEV_MODE=true; starts uvicorn :8000 and vite :5173
-```
-
-Paste your Anthropic key into the AnalysisPanel field — in this mode the key travels in the
-request body, not from `.env`. The Channels tab will 404 (see the DEV_MODE table above).
-
-Check what the agents can actually see before spending tokens:
+Before spending tokens, check what the agents can actually see:
 
 ```bash
 curl -s localhost:8000/api/v1/reference/layers | python3 -m json.tool
 ```
 
-`geology_store` and `wofe_store` false means the derived stores are not built. And note the
+`geology_store` / `wofe_store` false means the derived stores are not built. And note the
 difference between an artifact existing and it covering your AOI — the run log's
-`spatial_context` line reports `coverage` for the polygon you actually drew (Known Gap #2b).
-
-### Full stack — Docker Compose
-
-```bash
-# All 7 services: postgres, redis, minio, tileserver, backend, worker, frontend
-docker-compose up
-
-# Dev overlay — BOTH -f flags are required; docker-compose.dev.yml has no build context
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-
-# Run DB migrations (only meaningful with DEV_MODE=false — dev mode never touches the DB)
-docker-compose exec backend alembic upgrade head
-
-# Check PostGIS is live — service is named `postgres`, not `db`
-docker-compose exec postgres psql -U geoprospector -d geoprospector -c "SELECT PostGIS_Version();"
-
-# Tail logs — the Celery service is named `worker`
-docker-compose logs -f backend
-docker-compose logs -f worker
-
-open http://localhost:8000/docs     # API docs
-open http://localhost:5173          # frontend
-```
+`spatial_context` line reports `coverage` for the polygon actually drawn (Known Gap #2b).
 
 ### Gotchas that will waste your afternoon
 
@@ -868,6 +830,19 @@ open http://localhost:5173          # frontend
   because it wants geopandas — use `pyogrio.raw.read`, which returns a **4-tuple**
   `(meta, _, geometry_wkb, field_data)`.
 - macOS has no coreutils `timeout`. Use `curl --max-time`.
+- **ECONNREFUSED in the Vite proxy log means the backend is dead, not a frontend bug.**
+  `set -e` does not fire for background jobs, and under `--reload` uvicorn's reloader
+  survives an import error while the worker subprocess dies — so the PID looks healthy and
+  the traceback scrolls past above the Vite banner. `run-dev.sh` now polls `/health`, but
+  the diagnostic is always `cd backend && uvicorn app.main:app --port 8000` in the
+  foreground.
+- **pydantic-settings decodes complex-typed fields inside the settings source**, before any
+  validator runs — so a `field_validator` cannot rescue a malformed `List[str]` / `Dict`
+  env var. Use `Annotated[List[str], NoDecode]` plus a before-validator. This is what made
+  `CORS_ORIGINS=http://localhost:5173` kill the backend at import.
+- **`env_file = ".env"` resolves against the working directory**, not the module. `run-dev.sh`
+  cds into `backend/`, so the repo-root `.env` was silently never read. Build it from
+  `REPO_ROOT`.
 
 ---
 
