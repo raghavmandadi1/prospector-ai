@@ -1,6 +1,7 @@
 # Minimal deps for DEV_MODE=true (no PostGIS, no Celery)
 fastapi>=0.111.0
-pydantic-settings>=2.0
+# >=2.3 for NoDecode, which config.py needs to accept a plain CORS_ORIGINS string
+pydantic-settings>=2.3
 pydantic>=2.0
 uvicorn[standard]
 anthropic

@@ -35,6 +35,29 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 cd ..
 
+# Wait for the backend to actually answer before starting the frontend.
+#
+# Without this the script reports success no matter what. `set -e` does not fire
+# for background jobs, and under --reload uvicorn's *reloader* survives an import
+# error in the app while the worker subprocess dies — so $BACKEND_PID stays alive
+# and looks healthy. The only symptom was ECONNREFUSED in the Vite proxy log,
+# which reads like a frontend problem and is not one. Poll /health instead.
+echo -n "Waiting for backend"
+for i in $(seq 1 40); do
+    if curl -sf -o /dev/null http://localhost:8000/health; then
+        echo " — up"
+        break
+    fi
+    if [ "$i" = "40" ]; then
+        echo ""
+        echo "Backend failed to start within 20s. The traceback is above this line."
+        kill $BACKEND_PID 2>/dev/null
+        exit 1
+    fi
+    echo -n "."
+    sleep 0.5
+done
+
 # Start frontend
 cd frontend
 npm run dev &

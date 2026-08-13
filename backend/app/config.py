@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
-from typing import List
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
+from typing import Annotated, List
 
 # Repository root — backend/app/config.py → backend/app → backend → repo root.
 # Run records and the cell cache live under data/ relative to this, so they land
@@ -37,7 +39,24 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:5173"]
+    # `NoDecode`, not a bare `List[str]`. pydantic-settings JSON-decodes every
+    # complex-typed field inside the *source*, before any validator runs, so a
+    # `field_validator` cannot rescue a non-JSON value — `CORS_ORIGINS=http://
+    # localhost:5173` raised SettingsError at import and killed the backend
+    # before main.py line 8, which surfaced only as ECONNREFUSED in the Vite
+    # proxy log. NoDecode hands the raw string to the validator below instead.
+    cors_origins: Annotated[List[str], NoDecode] = ["http://localhost:5173"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v):
+        """Accept a JSON array, a comma-separated list, or a single origin."""
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if s.startswith("["):
+            return json.loads(s)
+        return [o.strip() for o in s.split(",") if o.strip()]
 
     # MinIO / S3
     minio_endpoint: str = "localhost:9000"
@@ -78,7 +97,11 @@ class Settings(BaseSettings):
     max_records_per_cell: int = 6
 
     class Config:
-        env_file = ".env"
+        # Absolute, not ".env". The relative form resolves against the working
+        # directory, and run-dev.sh cds into backend/ before starting uvicorn —
+        # so the repo-root .env was silently never read on the one path everyone
+        # uses.
+        env_file = str(REPO_ROOT / ".env")
         extra = "ignore"
 
 
