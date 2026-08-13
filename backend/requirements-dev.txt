@@ -14,3 +14,14 @@ sqlalchemy>=2.0
 pyyaml
 pytest
 pytest-asyncio
+
+# Reading the ESRI file geodatabases in data/raw/. Needed only by the offline
+# scripts/build_*.py extractors — the runtime reads their output with sqlite3 and
+# shapely, so a deployment that ships the derived artifacts does not need this.
+# The wheel bundles GDAL, which is the reason it is here rather than `fiona` or
+# `gdal`: neither of those installs without system libraries, and `ogr2ogr` is
+# not available on a plain macOS box.
+# NOTE: bbox/mask spatial push-down returns zero features on both WA DNR
+# geodatabases (stale .spx indexes), so the build scripts read whole layers.
+pyogrio>=0.10
+numpy

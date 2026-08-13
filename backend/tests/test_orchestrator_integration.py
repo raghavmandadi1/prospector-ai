@@ -85,9 +85,25 @@ async def test_full_run_produces_scores_and_a_record(stubbed):
     assert set(doc["agent_results"]) == {"lithology", "structure"}
     assert doc["provenance"]["prompt_version"]
     assert doc["timings"]["total_s"] >= 0
-    # structure has no knowledge file (Known Gaps #1) and the record says so
-    assert "structure" in doc["provenance"]["agents_without_knowledge"]
+    # Both agents are grounded now. This assertion used to read
+    # `"structure" in agents_without_knowledge` — a deliberate canary on Known
+    # Gap #1, and it fired the moment knowledge/structure/gold.md was written,
+    # which is exactly what it was for. Inverted rather than deleted, so a
+    # knowledge file going missing again is still a test failure.
+    assert doc["provenance"]["agents_without_knowledge"] == []
     assert "lithology/gold.md" in doc["provenance"]["knowledge_files"]
+    assert "structure/gold.md" in doc["provenance"]["knowledge_files"]
+
+    # Provenance now records which local evidence the agents actually saw. An
+    # empty list here means the run scored from model prior alone, and a
+    # benchmark delta taken across a change in this list is not a like-for-like
+    # comparison — so it is recorded per run rather than assumed constant.
+    assert "context_sources" in doc["provenance"]
+    assert isinstance(doc["provenance"]["context_sources"], list)
+    # No field pins may have been promoted to `truth` or `evidence` by accident:
+    # a truth pin visible to the model makes every later benchmark number
+    # meaningless, so the census is asserted rather than merely stored.
+    assert doc["provenance"]["pin_roles_active"].get("truth", 0) == 0
 
 
 async def test_second_identical_run_costs_nothing(stubbed):
