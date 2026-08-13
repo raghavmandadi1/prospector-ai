@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { ScoredCell } from '../../types'
+import { NOVELTY } from '../../types'
+import type { NoveltyMeta, ScoredCell } from '../../types'
 import { useAppStore } from '../../store'
 
 interface Props {
@@ -29,6 +30,14 @@ export default function EvidenceDrawer({ cell, onClose }: Props) {
       status: result.status,
     }
   })
+
+  // Novelty answers the first question a high score raises: is this finding
+  // something, or re-finding something? Undefined means the run never computed
+  // it — render nothing rather than implying the cell is virgin ground.
+  const noveltyMeta: NoveltyMeta | null =
+    cell.novelty != null ? NOVELTY[cell.novelty] ?? null : null
+  const nearestKm =
+    typeof cell.nearest_occurrence_km === 'number' ? cell.nearest_occurrence_km : null
 
   function tierColor(score: number): string {
     if (score >= 0.65) return 'text-red-400'
@@ -62,6 +71,45 @@ export default function EvidenceDrawer({ cell, onClose }: Props) {
           ×
         </button>
       </div>
+
+      {/* Novelty — deliberately above the score breakdown. A 0.91 cell sitting
+          on three recorded workings and a 0.91 cell on ground nobody has
+          written up mean opposite things. */}
+      {(noveltyMeta !== null || nearestKm !== null) && (
+        <div className="px-4 py-3 border-b border-gray-700 flex items-start gap-2">
+          <span
+            className="w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1"
+            style={{ background: noveltyMeta?.color ?? '#6b7280' }}
+          />
+          <div className="min-w-0">
+            {noveltyMeta !== null && (
+              <>
+                <div
+                  className="text-xs font-semibold"
+                  style={{ color: noveltyMeta.color }}
+                >
+                  {noveltyMeta.label}
+                </div>
+                <div className="text-[11px] text-gray-400 leading-snug">
+                  {noveltyMeta.blurb}
+                </div>
+              </>
+            )}
+            <div className="text-[11px] text-gray-300 mt-1">
+              {nearestKm !== null ? (
+                <>
+                  Nearest recorded working{' '}
+                  <span className="font-semibold tabular-nums">
+                    {nearestKm.toFixed(2)} km
+                  </span>
+                </>
+              ) : (
+                'No recorded working within the search radius'
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Composite stats */}
       <div className="px-4 py-3 border-b border-gray-700 grid grid-cols-2 gap-3 text-xs">

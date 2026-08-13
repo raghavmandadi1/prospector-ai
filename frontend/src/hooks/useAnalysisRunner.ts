@@ -63,25 +63,52 @@ export function useAnalysisRunner() {
 
         case 'spatial_context': {
           const counts = event.counts ?? {}
-          const total = Object.values(counts).reduce((a, b) => a + b, 0)
+          const coverage = event.coverage ?? {}
+          const sources = event.sources ?? []
+          const withFacts = event.cells_with_facts ?? 0
+          const cells = event.cells_total ?? 0
+
           if (event.error) {
             appendLog({
               level: 'warn',
-              message: 'Spatial context unavailable — agents run on LLM regional knowledge only',
+              message: 'No evidence for this AOI — agents run on LLM regional knowledge only',
               metric: '0 records',
               detail: event.error,
             })
-          } else {
+            break
+          }
+
+          // Per-cell facts are the primary evidence now, so cell coverage is the
+          // headline number rather than a raw record count.
+          appendLog({
+            level: withFacts > 0 ? 'info' : 'warn',
+            message:
+              withFacts > 0
+                ? 'Evidence loaded'
+                : 'No per-cell evidence — every cell scored from model prior',
+            metric: cells > 0 ? `${withFacts}/${cells} cells` : `${withFacts} cells`,
+            detail: [
+              sources.length ? `sources: ${sources.join(', ')}` : 'sources: none',
+              ...Object.entries(coverage).map(([k, v]) => `${k}: ${v}`),
+              ...Object.entries(counts).map(([k, v]) => `${k}: ${v}`),
+            ].join('\n'),
+          })
+
+          // An artifact being installed and it covering this polygon are different
+          // claims. The 1:24k geology is a 342-quadrangle mosaic and its holes sit
+          // over most of the districts worth drawing, so silence here would let a
+          // run look grounded while lithology and structure fell back to prior.
+          if (coverage.cells_with_geology === 0 && cells > 0) {
             appendLog({
-              level: total > 0 ? 'info' : 'warn',
-              message:
-                total > 0
-                  ? 'Spatial context loaded'
-                  : 'Spatial context empty — no database evidence for any agent',
-              metric: `${total} records`,
-              detail: Object.entries(counts)
-                .map(([k, v]) => `${k}: ${v}`)
-                .join('\n'),
+              level: 'warn',
+              message: 'No mapped 1:24k geology covers this AOI',
+              metric: '0 polygons',
+              detail:
+                coverage.cells_with_wofe && coverage.cells_with_wofe > 0
+                  ? 'OF-00-495 does cover it, so lithology and structure still have ' +
+                    'evidence — but the 1:24,000 units and fault azimuths are absent.'
+                  : 'Lithology and structure will score from model prior. That is ' +
+                    '0.55 of the gold weight ungrounded for this polygon.',
             })
           }
           break

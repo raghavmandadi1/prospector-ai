@@ -19,7 +19,18 @@ const EMPTY_USAGE: RunUsage = {
   estCostUsd: 0,
 }
 
-export type OverlayId = 'plss' | 'wilderness' | 'toponyms' | 'occurrences' | 'coverage'
+export type OverlayId =
+  | 'plss'
+  | 'wilderness'
+  | 'toponyms'
+  | 'occurrences'
+  /** WA DNR mining-district polygons */
+  | 'districts'
+  /** Inactive and abandoned mine lands — adits and shafts */
+  | 'iaml'
+  /** The user's own imported field pins ("My Sites") */
+  | 'user_sites'
+  | 'coverage'
 
 export interface MapView {
   lng: number
@@ -35,6 +46,7 @@ interface MapPrefs {
   basemap: string
   resultsOpacity: number
   resultsVisible: boolean
+  noveltyOutlines: boolean
   overlays: Record<OverlayId, boolean>
   mapView: MapView | null
 }
@@ -43,11 +55,17 @@ const DEFAULT_PREFS: MapPrefs = {
   basemap: DEFAULT_BASEMAP,
   resultsOpacity: 0.6,
   resultsVisible: true,
+  // On by default: without it a hot cell on known ground and a hot cell on
+  // virgin ground look identical, which is the thing they most must not.
+  noveltyOutlines: true,
   overlays: {
     plss: false,
     wilderness: false,
     toponyms: false,
     occurrences: false,
+    districts: false,
+    iaml: false,
+    user_sites: false,
     coverage: false,
   },
   mapView: null,
@@ -147,6 +165,12 @@ interface AppState {
   setResultsOpacity: (v: number) => void
   resultsVisible: boolean
   setResultsVisible: (v: boolean) => void
+
+  /** Draw the per-cell novelty outline (confirms / extends / lead) over the
+   *  results grid. Worth being able to switch off on a dense display grid,
+   *  where contiguous leads merge into one wash of colour. */
+  noveltyOutlines: boolean
+  setNoveltyOutlines: (v: boolean) => void
 
   overlays: Record<OverlayId, boolean>
   toggleOverlay: (id: OverlayId, on?: boolean) => void
@@ -270,6 +294,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setResultsVisible: (resultsVisible) => {
     savePrefs({ resultsVisible })
     set({ resultsVisible })
+  },
+
+  noveltyOutlines: PREFS.noveltyOutlines,
+  setNoveltyOutlines: (noveltyOutlines) => {
+    savePrefs({ noveltyOutlines })
+    set({ noveltyOutlines })
   },
 
   overlays: PREFS.overlays,

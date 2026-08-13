@@ -4,7 +4,8 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw'
 import area from '@turf/area'
 import { useAppStore } from '../../store'
 import type { OverlayId } from '../../store'
-import type { ScoredCell } from '../../types'
+import { NOVELTY, NOVELTY_ORDER } from '../../types'
+import type { NoveltyClass, ScoredCell } from '../../types'
 import {
   BASEMAPS,
   LABEL_FONT,
@@ -33,6 +34,17 @@ const MIN_AOI_AREA_M2 = 25_000_000
 const OUTLINE_MAX_CELLS = 2000
 
 const DEFAULT_VIEW = { lng: -120.5, lat: 47.5, zoom: 7 }
+
+/**
+ * MapLibre's `ExpressionSpecification` is a deeply recursive tuple union that
+ * TypeScript cannot infer from an array literal, so every expression in this
+ * file has to be cast. These two helpers keep the cast in one place instead of
+ * sprinkling `as unknown as` down the file.
+ */
+const expr = (e: unknown[]): maplibregl.ExpressionSpecification =>
+  e as unknown as maplibregl.ExpressionSpecification
+const filt = (e: unknown[]): maplibregl.FilterSpecification =>
+  e as unknown as maplibregl.FilterSpecification
 
 // Tier color scale
 const TIER_COLORS: Record<string, string> = {
@@ -106,7 +118,7 @@ export default function MapView() {
     setAoiAreaKm2,
     shadingMode,
     basemap,
-    resultsOpacity, resultsVisible,
+    resultsOpacity, resultsVisible, noveltyOutlines,
     overlays,
     resolutionM,
     setMapView,
@@ -261,6 +273,8 @@ export default function MapView() {
         },
       })
 
+      addNoveltyLayers(map)
+
       addLabelLayers(map)
 
       // Click handler for evidence drawer
@@ -285,14 +299,27 @@ export default function MapView() {
         map.getCanvas().style.cursor = ''
       })
 
-      // Popups for the reference point layers
-      for (const id of ['toponym-points', 'occurrence-points']) {
-        map.on('click', id, (e) => {
+      // Popups for the reference layers. Each layer names its own renderer:
+      // the generic key/value dump is fine for a toponym or a field pin, but
+      // useless for an occurrence record, where which fields are present is
+      // itself the information.
+      for (const [layerId, render] of Object.entries(POPUP_RENDERERS)) {
+        map.on('click', layerId, (e) => {
           const f = e.features?.[0]
           if (!f) return
-          new maplibregl.Popup({ closeButton: true, maxWidth: '280px' })
+          // The district fill spans whole valleys and sits under the results
+          // grid, so a click aimed at a scored cell would otherwise pop a
+          // district too. Results win wherever they are drawn.
+          if (
+            BLOCKED_BY_RESULTS.has(layerId) &&
+            map.getLayer('results-cells') &&
+            map.queryRenderedFeatures(e.point, { layers: ['results-cells'] }).length > 0
+          ) {
+            return
+          }
+          new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
             .setLngLat(e.lngLat)
-            .setHTML(popupHtml(f.properties as Record<string, unknown>))
+            .setHTML(render(f.properties as Record<string, unknown>))
             .addTo(map)
         })
       }
@@ -342,6 +369,11 @@ export default function MapView() {
         percentile: cell.percentile ?? null,
         parent_cell_id: cell.parent_cell_id ?? null,
         tier: cell.tier ?? scoreTier(cell.score),
+        // Absent on older runs and wherever the occurrence extract was never
+        // built. null (not a string) so ['get','novelty'] matches no filter and
+        // the cell simply gets no outline — unknown must never read as 'lead'.
+        novelty: cell.novelty ?? null,
+        nearest_occurrence_km: cell.nearest_occurrence_km ?? null,
         evidence: JSON.stringify(cell.evidence),
         data_sources_used: JSON.stringify(cell.data_sources_used),
       },
@@ -351,14 +383,24 @@ export default function MapView() {
 
     // Thin (then drop) the outline as the grid gets dense — past a couple of
     // thousand cells the strokes dominate the fill they are meant to delimit.
+    const n = features.length
     if (map.getLayer('results-cells-outline')) {
-      const n = features.length
       map.setPaintProperty(
         'results-cells-outline',
         'line-opacity',
         n > OUTLINE_MAX_CELLS ? 0 : n > 600 ? 0.15 : 0.3
       )
       map.setPaintProperty('results-cells-outline', 'line-width', n > 600 ? 0.3 : 0.5)
+    }
+
+    // Novelty outlines are thinned on a dense grid but never dropped: unlike
+    // the cell grid, which is only decoration once you can see the fill, this
+    // is the only channel telling a novel hotspot from a re-discovery.
+    for (const cls of NOVELTY_ORDER) {
+      const id = NOVELTY_LAYERS[cls]
+      if (!map.getLayer(id)) continue
+      const w = NOVELTY[cls].width
+      map.setPaintProperty(id, 'line-width', n > 600 ? w * 0.6 : w)
     }
   }, [analysisResults, styleReady])
 
@@ -378,7 +420,15 @@ export default function MapView() {
       'visibility',
       resultsVisible ? 'visible' : 'none'
     )
-  }, [shadingMode, resultsOpacity, resultsVisible, styleReady])
+    // Novelty rides on the results layer: hiding results hides its flags too,
+    // otherwise you get outlines around cells whose scores are not on screen.
+    const noveltyOn = resultsVisible && noveltyOutlines
+    for (const cls of NOVELTY_ORDER) {
+      const id = NOVELTY_LAYERS[cls]
+      if (!map.getLayer(id)) continue
+      map.setLayoutProperty(id, 'visibility', noveltyOn ? 'visible' : 'none')
+    }
+  }, [shadingMode, resultsOpacity, resultsVisible, noveltyOutlines, styleReady])
 
   // Overlay visibility + lazy data loading
   useEffect(() => {
@@ -484,17 +534,167 @@ export default function MapView() {
   )
 }
 
+// --- Novelty outlines ------------------------------------------------------
+
+/**
+ * One line layer per novelty class, because `line-dasharray` is **not**
+ * data-driven in MapLibre — it accepts zoom expressions only, so the dash
+ * pattern cannot be a `['get', 'novelty']` match and each class needs its own
+ * filtered layer.
+ *
+ * Ids do not follow the `<source>-<type>` convention as literally as
+ * `results-cells-outline`; `results-novelty-<class>` reads better and stays
+ * greppable against NOVELTY in types/index.ts.
+ */
+const NOVELTY_LAYERS: Record<NoveltyClass, string> = {
+  lead: 'results-novelty-lead',
+  extends: 'results-novelty-extends',
+  confirms: 'results-novelty-confirms',
+}
+
+/** Legend border-style → map dash pattern. NoveltyMeta carries the CSS name so
+ *  the legend swatch needs no second opinion about what the map drew. */
+const DASH_FOR_STYLE: Record<'solid' | 'dashed' | 'dotted', [number, number] | null> = {
+  solid: null,
+  dashed: [3, 2],
+  dotted: [1, 2],
+}
+
+/**
+ * Novelty is drawn as an outline on top of the score fill, never as a change to
+ * the fill ramp. They answer different questions — "how good does this look"
+ * and "has anyone been here" — and collapsing them into one colour channel
+ * would make a confirmed re-discovery indistinguishable from a fresh lead,
+ * which is the entire problem this layer exists to fix.
+ *
+ * Cells whose `novelty` is null (older run, or no occurrence extract on disk)
+ * match none of the three filters and get no outline at all.
+ */
+function addNoveltyLayers(map: maplibregl.Map) {
+  for (const cls of NOVELTY_ORDER) {
+    const meta = NOVELTY[cls]
+    const dash = DASH_FOR_STYLE[meta.borderStyle]
+    map.addLayer({
+      id: NOVELTY_LAYERS[cls],
+      type: 'line',
+      source: 'results-grid',
+      filter: filt(['==', ['get', 'novelty'], cls]),
+      paint: {
+        'line-color': meta.color,
+        'line-width': meta.width,
+        'line-opacity': 0.9,
+        ...(dash ? { 'line-dasharray': dash } : {}),
+      },
+    })
+  }
+}
+
 // --- Overlay wiring --------------------------------------------------------
 
 const OVERLAY_LAYERS: Record<OverlayId, string[]> = {
   coverage: ['coverage-fill'],
   wilderness: ['wilderness-fill', 'wilderness-outline', 'wilderness-label'],
   plss: ['plss-raster'],
-  occurrences: ['occurrence-points'],
+  districts: ['districts-fill', 'districts-outline', 'districts-label'],
+  occurrences: ['occurrence-halo', 'occurrence-points', 'occurrence-labels'],
+  iaml: ['iaml-points', 'iaml-labels'],
+  user_sites: ['user-sites-new-ring', 'user-sites-points', 'user-sites-labels'],
   toponyms: ['toponym-lines', 'toponym-points', 'toponym-labels'],
 }
 
+/**
+ * Overlay → endpoint, exhaustive by type: adding an OverlayId without a URL is
+ * now a compile error. This used to be a ternary chain whose final `else`
+ * fetched `/reference/occurrences`, so any id it did not recognise silently
+ * pulled the occurrence layer and pushed it into the wrong source.
+ */
+const OVERLAY_URL: Record<OverlayId, string | null> = {
+  plss: null, // raster WMS — nothing to fetch
+  coverage: null, // bbox-dependent, handled separately in loadOverlayData
+  wilderness: `${API_BASE}/reference/wilderness`,
+  toponyms: `${API_BASE}/reference/toponyms`,
+  occurrences: `${API_BASE}/reference/occurrences`,
+  districts: `${API_BASE}/reference/districts`,
+  iaml: `${API_BASE}/reference/iaml`,
+  user_sites: `${API_BASE}/reference/user-sites`,
+}
+
+/** Overlay → GeoJSON source id. Identity except for `user_sites`, whose layer
+ *  and source ids use the hyphenated spelling. */
+const OVERLAY_SOURCE: Record<OverlayId, string | null> = {
+  plss: null,
+  coverage: 'coverage',
+  wilderness: 'wilderness',
+  toponyms: 'toponyms',
+  occurrences: 'occurrences',
+  districts: 'districts',
+  iaml: 'iaml',
+  user_sites: 'user-sites',
+}
+
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
+
+// --- Occurrence styling ----------------------------------------------------
+
+/**
+ * Evidence weight of an occurrence record: 2 = documented production,
+ * 1 = assays on record, 0 = a bare recorded occurrence.
+ *
+ * WA DNR hands us this as two flags (PRODUCTION / ASSAYS), which is the same
+ * distinction `knowledge/historical/gold.md` calls assay primacy — a machine
+ * readable version of something the knowledge file currently asks the LLM to
+ * infer. Drawing all three at one size would throw it away.
+ */
+const OCC_WEIGHT: unknown[] = [
+  'case',
+  ['==', ['get', 'production'], true], 2,
+  ['==', ['get', 'assays'], true], 1,
+  0,
+]
+
+/**
+ * Assumed positional uncertainty per `accuracy_class`, in km. These are stated
+ * assumptions, not published figures — WA DNR's LOCATION_ACCURACY field gives
+ * words, not metres. What matters is the ordering and the order of magnitude:
+ *
+ *   survey            GPS or orthophoto                       0.02 km
+ *   topo              plotted on a 7.5' quad                  0.15 km
+ *   derived           back-computed from a location or legal
+ *                     description (a ¼ section is ~400 m)     0.40 km
+ *   variable          "coordinate accuracy highly variable" —
+ *                     DNR states no bound at all              1.0 km
+ *   district_centroid a district CENTRE, not a site           3.0 km
+ *   unknown           unrecognised string                     1.0 km
+ *
+ * This is not an edge case: measured over the 3314 features in
+ * data/reference/wa_occurrences.geojson, 2187 are `variable`, 505 `topo`,
+ * 494 `derived`, 85 `survey` and 43 `district_centroid`. Two thirds of the
+ * layer is a point DNR itself will not vouch for, and drawing those as crisp
+ * dots would be the single most misleading thing this layer could do — so the
+ * uncertainty gets drawn: see `occurrence-halo`.
+ */
+const ACCURACY_KM: unknown[] = [
+  'match', ['get', 'accuracy_class'],
+  'survey', 0.02,
+  'topo', 0.15,
+  'derived', 0.4,
+  'variable', 1.0,
+  'district_centroid', 3.0,
+  1.0, // default — 'unknown' or a class we have not seen
+]
+
+/**
+ * Pixels per kilometre at latitude 47.5° (mid-Washington):
+ * metres/px = 156543.03 · cos(47.5°) / 2^z = 105_760 / 2^z, so px/km = 2^z / 105.76.
+ *
+ * Interpolating between these two stops with `['exponential', 2]` reproduces a
+ * constant ground size exactly. MapLibre clamps outside the stop range, which
+ * is the cap we want — a 3 km halo at z17 would be 1200 px of blue.
+ */
+const PX_PER_KM_Z9 = 4.84
+const PX_PER_KM_Z14 = 154.9
+
+// --- Layer construction ----------------------------------------------------
 
 /** Fill/line/raster layers, added below the results grid. */
 function addOverlayLayers(map: maplibregl.Map) {
@@ -534,6 +734,41 @@ function addOverlayLayers(map: maplibregl.Map) {
     paint: { 'line-color': '#16a34a', 'line-width': 1.5, 'line-dasharray': [3, 2] },
   })
 
+  // WA DNR mining districts. Big polygons, so they sit under the results grid
+  // and stay faint — this is context for "which camp am I in", not a signal.
+  map.addSource('districts', { type: 'geojson', data: EMPTY })
+  map.addLayer({
+    id: 'districts-fill',
+    type: 'fill',
+    source: 'districts',
+    layout: { visibility: 'none' },
+    paint: {
+      'fill-color': '#b45309', // amber-700 — mining brown, clear of the score ramp
+      // A district with recorded production reads stronger than one that is
+      // merely named. Prod_Amnt is free text in the DNR table, so the test is
+      // "coerces to a non-empty value", not a number comparison.
+      //
+      // Measured 2026-08-12 against data/reference/wa_mining_districts.geojson:
+      // production_amount is empty on all 68 districts, so today every district
+      // draws at 0.06 and every popup says "no production recorded". The
+      // encoding is kept because it is correct and will light up if that extract
+      // gains the DNR Prod_Amnt column — it is not silently broken.
+      'fill-opacity': expr(['case', ['to-boolean', ['get', 'production_amount']], 0.14, 0.06]),
+    },
+  })
+  map.addLayer({
+    id: 'districts-outline',
+    type: 'line',
+    source: 'districts',
+    layout: { visibility: 'none' },
+    paint: {
+      'line-color': '#92400e',
+      'line-width': 1.2,
+      'line-opacity': 0.8,
+      'line-dasharray': [4, 2],
+    },
+  })
+
   map.addSource('plss', PLSS_SOURCE)
   map.addLayer({
     id: 'plss-raster',
@@ -555,6 +790,40 @@ function addOverlayLayers(map: maplibregl.Map) {
   })
 
   map.addSource('occurrences', { type: 'geojson', data: EMPTY })
+
+  /**
+   * Positional-uncertainty halo, drawn as ground area rather than a fixed dot.
+   *
+   * It lives *under* the results grid on purpose: it is terrain context, and a
+   * 1 km translucent disc painted over the scores would hide the thing you are
+   * trying to read. The dot itself goes above (see addLabelLayers), so a site
+   * stays clickable at any results opacity.
+   *
+   * minzoom 9 because statewide there are ~3300 of these and at z7 they merge
+   * into one blue wash that says nothing.
+   */
+  map.addLayer({
+    id: 'occurrence-halo',
+    type: 'circle',
+    source: 'occurrences',
+    minzoom: 9,
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': expr([
+        'interpolate', ['exponential', 2], ['zoom'],
+        9, ['*', PX_PER_KM_Z9, ACCURACY_KM],
+        14, ['*', PX_PER_KM_Z14, ACCURACY_KM],
+      ]),
+      'circle-color': '#1d4ed8',
+      'circle-opacity': 0.1,
+      'circle-stroke-color': '#1d4ed8',
+      'circle-stroke-width': 0.5,
+      'circle-stroke-opacity': 0.3,
+    },
+  })
+
+  map.addSource('iaml', { type: 'geojson', data: EMPTY })
+  map.addSource('user-sites', { type: 'geojson', data: EMPTY })
 }
 
 /** Point and label layers, added above the results grid so names stay legible. */
@@ -573,17 +842,236 @@ function addLabelLayers(map: maplibregl.Map) {
     paint: { 'text-color': '#166534', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
   })
 
+  // District names read from z6 — a district is the unit the historical
+  // literature is written in ("the Republic district"), so it is worth seeing
+  // before you have zoomed in far enough to draw an AOI.
+  map.addLayer({
+    id: 'districts-label',
+    type: 'symbol',
+    source: 'districts',
+    minzoom: 6,
+    layout: {
+      visibility: 'none',
+      'text-field': ['get', 'name'],
+      'text-font': LABEL_FONT,
+      'text-size': 12,
+      'text-transform': 'uppercase',
+      'text-letter-spacing': 0.08,
+      'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#7c2d12', 'text-halo-color': '#ffffff', 'text-halo-width': 1.8 },
+  })
+
+  /**
+   * The occurrence dot. Radius and fill carry evidence weight (production >
+   * assays > bare record); the stroke carries positional accuracy, and
+   * `district_centroid` is drawn hollow because it is not a site at all — it is
+   * a district centre wearing a site's coordinates, the exact failure mode
+   * benchmarks/labels.yaml warns about.
+   */
   map.addLayer({
     id: 'occurrence-points',
     type: 'circle',
     source: 'occurrences',
     layout: { visibility: 'none' },
     paint: {
-      'circle-radius': 4,
-      'circle-color': '#0ea5e9',
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': 1,
+      'circle-radius': expr([
+        'interpolate', ['linear'], ['zoom'],
+        7, ['+', 2.0, ['*', 0.7, OCC_WEIGHT]],
+        12, ['+', 3.6, ['*', 1.5, OCC_WEIGHT]],
+        16, ['+', 5.0, ['*', 2.0, OCC_WEIGHT]],
+      ]),
+      'circle-color': expr([
+        'case',
+        ['==', ['get', 'production'], true], '#1d4ed8', // blue-700 — produced
+        ['==', ['get', 'assays'], true], '#3b82f6',     // blue-500 — assayed
+        '#93c5fd',                                      // blue-300 — bare record
+      ]),
+      // Crisp = we know where it is. Washy = we do not.
+      'circle-opacity': expr([
+        'match', ['get', 'accuracy_class'],
+        'survey', 0.95,
+        'topo', 0.9,
+        'derived', 0.7,
+        'district_centroid', 0.0, // hollow ring
+        0.45,
+      ]),
+      'circle-stroke-color': expr([
+        'case',
+        ['==', ['get', 'accuracy_class'], 'district_centroid'], '#1e3a8a',
+        '#ffffff',
+      ]),
+      'circle-stroke-width': expr([
+        'match', ['get', 'accuracy_class'],
+        'survey', 1.4,
+        'topo', 1.2,
+        'derived', 1.0,
+        'district_centroid', 1.6,
+        0.8,
+      ]),
+      'circle-stroke-opacity': expr([
+        'match', ['get', 'accuracy_class'],
+        'survey', 1.0,
+        'topo', 0.95,
+        'derived', 0.7,
+        'district_centroid', 0.9,
+        0.4,
+      ]),
     },
+  })
+
+  map.addLayer({
+    id: 'occurrence-labels',
+    type: 'symbol',
+    source: 'occurrences',
+    minzoom: 11,
+    layout: {
+      visibility: 'none',
+      'text-field': ['get', 'name'],
+      'text-font': LABEL_FONT,
+      'text-size': 11,
+      'text-offset': [0, 1.1],
+      'text-anchor': 'top',
+      'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#0c4a6e', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
+  })
+
+  /**
+   * IAML — inactive and abandoned mine lands. This is where adits and shafts
+   * are, i.e. physical holes you could stand in front of, so a recorded hazard
+   * gets a yellow rim: it is the only attribute on this map with a safety
+   * consequence.
+   *
+   * `hazard` is DNR free text, measured in data/reference/wa_iaml.geojson as
+   * 'yes' (46 sites), 'unknown' (49), 'no' (2) and '' (all 358 features). Only
+   * 'yes' earns the rim — a `to-boolean` test would flag 'no' and 'unknown' too,
+   * which is worse than useless. **A white rim is therefore not a statement that
+   * a site is safe**: half the sites were never assessed, and the popup shows
+   * the raw value.
+   */
+  map.addLayer({
+    id: 'iaml-points',
+    type: 'circle',
+    source: 'iaml',
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': expr([
+        'interpolate', ['linear'], ['zoom'],
+        9, ['case', ['==', ['get', 'kind'], 'site'], 3.5, 2.5],
+        14, ['case', ['==', ['get', 'kind'], 'site'], 7.0, 5.0],
+      ]),
+      'circle-color': expr([
+        'case', ['==', ['get', 'kind'], 'site'], '#a21caf', '#d946ef',
+      ]),
+      'circle-stroke-color': expr([
+        'case', ['==', ['get', 'hazard'], 'yes'], '#fde047', '#ffffff',
+      ]),
+      'circle-stroke-width': expr([
+        'case', ['==', ['get', 'hazard'], 'yes'], 1.8, 1.0,
+      ]),
+      'circle-opacity': 0.9,
+    },
+  })
+
+  map.addLayer({
+    id: 'iaml-labels',
+    type: 'symbol',
+    source: 'iaml',
+    minzoom: 12,
+    layout: {
+      visibility: 'none',
+      'text-field': ['get', 'name'],
+      'text-font': LABEL_FONT,
+      'text-size': 10,
+      'text-offset': [0, 1.1],
+      'text-anchor': 'top',
+      'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#701a75', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
+  })
+
+  /**
+   * "Not in any database" ring — steps-2.0 §30.3. A field-visit pin more than
+   * ~200 m from every DNR/MRDS record is an undocumented working located by
+   * someone who went there, and it is the most interesting record in the
+   * system. It gets the same cyan as a novelty `lead` cell, deliberately: in
+   * this app cyan means "nothing recorded here".
+   */
+  map.addLayer({
+    id: 'user-sites-new-ring',
+    type: 'circle',
+    source: 'user-sites',
+    filter: filt(['==', ['get', 'potentially_new'], true]),
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': expr(['interpolate', ['linear'], ['zoom'], 9, 7, 14, 13]),
+      'circle-opacity': 0,
+      'circle-stroke-color': NOVELTY.lead.color,
+      'circle-stroke-width': 2,
+      'circle-stroke-opacity': 0.9,
+    },
+  })
+
+  /**
+   * The user's own pins. White core with a coloured rim so they never read as
+   * one of the data layers.
+   *
+   * Radius encodes provenance, because §30.1's whole point is that "I stood
+   * here" and "I read about this" are different evidence. Rim colour encodes
+   * `role`: blue = evidence (this pin is in the agent prompts, same blue as the
+   * occurrence layer), near-black = truth (benchmark ground truth — drawn here,
+   * but `build_local_context` filters it out of every prompt), grey = display.
+   */
+  map.addLayer({
+    id: 'user-sites-points',
+    type: 'circle',
+    source: 'user-sites',
+    layout: { visibility: 'none' },
+    paint: {
+      'circle-radius': expr([
+        'interpolate', ['linear'], ['zoom'],
+        9, ['match', ['get', 'provenance'], 'field_visit', 4.5, 'literature', 3.2, 2.4],
+        14, ['match', ['get', 'provenance'], 'field_visit', 9.0, 'literature', 6.0, 4.5],
+      ]),
+      'circle-color': '#ffffff',
+      'circle-opacity': expr(['case', ['==', ['get', 'visited'], true], 1.0, 0.75]),
+      'circle-stroke-color': expr([
+        'match', ['get', 'role'],
+        'evidence', '#1d4ed8',
+        'truth', '#111827',
+        '#525252', // display
+      ]),
+      'circle-stroke-width': expr([
+        'match', ['get', 'provenance'],
+        'field_visit', 2.2,
+        'literature', 1.4,
+        0.9, // inference / hearsay / unknown — deliberately faint
+      ]),
+      'circle-stroke-opacity': expr([
+        'match', ['get', 'provenance'],
+        'field_visit', 1.0,
+        'literature', 0.85,
+        0.5,
+      ]),
+    },
+  })
+
+  map.addLayer({
+    id: 'user-sites-labels',
+    type: 'symbol',
+    source: 'user-sites',
+    minzoom: 11,
+    layout: {
+      visibility: 'none',
+      'text-field': ['get', 'name'],
+      'text-font': LABEL_FONT,
+      'text-size': 11,
+      'text-offset': [0, 1.2],
+      'text-anchor': 'top',
+      'text-allow-overlap': false,
+    },
+    paint: { 'text-color': '#111827', 'text-halo-color': '#ffffff', 'text-halo-width': 2 },
   })
 
   map.addLayer({
@@ -637,17 +1125,21 @@ async function loadOverlayData(map: maplibregl.Map, id: OverlayId, force = false
       return
     }
 
-    const url =
-      id === 'wilderness'
-        ? `${API_BASE}/reference/wilderness`
-        : id === 'toponyms'
-        ? `${API_BASE}/reference/toponyms`
-        : `${API_BASE}/reference/occurrences`
+    const url = OVERLAY_URL[id]
+    const sourceId = OVERLAY_SOURCE[id]
+    if (!url || !sourceId) return
 
     const r = await fetch(url)
-    if (!r.ok) return
+    // 404 is the normal answer for a reference file that was never built — the
+    // LayerPanel greys the toggle out from /reference/layers, but a stale
+    // localStorage pref can still ask for one. Forget the attempt so that
+    // building the file and re-toggling picks it up without a page reload.
+    if (!r.ok) {
+      loaded.delete(id)
+      return
+    }
     const fc = (await r.json()) as GeoJSON.FeatureCollection
-    ;(map.getSource(id) as maplibregl.GeoJSONSource)?.setData(fc)
+    ;(map.getSource(sourceId) as maplibregl.GeoJSONSource)?.setData(fc)
 
     if (id === 'toponyms') {
       // Draw streams along their length. GNIS locates a stream at its MOUTH,
@@ -678,11 +1170,210 @@ async function loadOverlayData(map: maplibregl.Map, id: OverlayId, force = false
   }
 }
 
-function popupHtml(props: Record<string, unknown>): string {
-  const esc = (v: unknown) =>
-    String(v ?? '').replace(/[&<>"]/g, (c) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!)
+// --- Popups ----------------------------------------------------------------
+
+const esc = (v: unknown) =>
+  String(v ?? '').replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!)
+  )
+
+/**
+ * Only http(s) links are rendered as links.
+ *
+ * These URLs come out of a data file, and a `javascript:` value in a `href`
+ * inside a popup would execute in the page. The scheme check is the whole
+ * defence; escaping alone would not stop it.
+ */
+function safeUrl(v: unknown): string | null {
+  const s = String(v ?? '').trim()
+  return /^https?:\/\//i.test(s) ? s : null
+}
+
+interface ScannedDoc {
+  title?: string
+  author?: string
+  date?: number | string | null
+  type?: string
+  url?: string
+}
+
+/**
+ * `docs` is an array in the GeoJSON we serve, but MapLibre round-trips feature
+ * properties through its vector-tile serializer, which has no array type and
+ * JSON-stringifies anything non-scalar. Which of the two a click handler sees
+ * depends on the source path, so accept both rather than discover the
+ * difference the first time someone clicks a site with documents.
+ */
+function parseDocs(v: unknown): ScannedDoc[] {
+  if (Array.isArray(v)) return v as ScannedDoc[]
+  if (typeof v === 'string' && v.trim().startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(v)
+      return Array.isArray(parsed) ? (parsed as ScannedDoc[]) : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+/** Flags survive as booleans through a GeoJSON source and as strings through a
+ *  vector-tile round trip; treat both as true. */
+const isTrue = (v: unknown) => v === true || v === 'true' || v === 1
+
+const POPUP_WRAP = 'font-size:11px;line-height:1.45;max-height:340px;overflow-y:auto'
+const MUTED = 'color:#6b7280'
+
+/**
+ * Occurrence popup — the acceptance criterion in steps-2.0 §32: name, commodity,
+ * district, assay/production flags, location accuracy, and a link to the scanned
+ * source document where one exists.
+ *
+ * Written by hand rather than dumped through `popupHtml` because for this record
+ * *absence is information*: "no assay on record" is a real statement about a
+ * site, and a key/value table that simply omits empty fields cannot make it.
+ */
+function occurrencePopupHtml(p: Record<string, unknown>): string {
+  const s = (k: string) => String(p[k] ?? '').trim()
+  const chip = (label: string, on: boolean) =>
+    `<span style="display:inline-block;padding:1px 5px;border-radius:3px;margin-right:4px;` +
+    `background:${on ? '#1d4ed8' : '#e5e7eb'};color:${on ? '#ffffff' : '#6b7280'}">` +
+    `${esc(label)}</span>`
+
+  const out: string[] = []
+  out.push(
+    `<div style="font-size:13px;font-weight:600;margin-bottom:2px">${esc(s('name') || 'Unnamed site')}</div>`
+  )
+
+  const where = [s('district') && `${esc(s('district'))} district`, s('county') && `${esc(s('county'))} Co.`]
+    .filter(Boolean)
+    .join(' · ')
+  if (where) out.push(`<div style="${MUTED};margin-bottom:4px">${where}</div>`)
+
+  if (s('commodity_primary') || s('commodities')) {
+    out.push(
+      `<div><b>${esc(s('commodity_primary') || '—')}</b>` +
+        (s('commodities') ? `<span style="${MUTED}"> · ${esc(s('commodities'))}</span>` : '') +
+        `</div>`
     )
+  }
+
+  // Evidence flags first: these are what the historical agent's assay-primacy
+  // rule keys off, so they are the most decision-relevant thing in the record.
+  out.push(
+    `<div style="margin:5px 0">` +
+      chip(isTrue(p.production) ? 'production' : 'no production', isTrue(p.production)) +
+      chip(isTrue(p.assays) ? 'assays' : 'no assays', isTrue(p.assays)) +
+      `</div>`
+  )
+
+  if (s('location_accuracy') || s('accuracy_class')) {
+    out.push(
+      `<div style="${MUTED}">Position: ${esc(s('location_accuracy') || s('accuracy_class'))}</div>`
+    )
+  }
+  if (s('accuracy_class') === 'district_centroid') {
+    out.push(
+      `<div style="color:#b45309;margin-top:2px">` +
+        `This point is a mining-district <b>centroid</b>, not a site location.</div>`
+    )
+  }
+  if (s('legal_description')) {
+    out.push(`<div style="${MUTED}">${esc(s('legal_description'))}</div>`)
+  }
+
+  const mineralogy = [s('ore_minerals'), s('gangue')].filter(Boolean).join(' / ')
+  if (mineralogy) {
+    out.push(`<div style="margin-top:4px">${esc(mineralogy)}</div>`)
+  }
+  if (s('comments')) {
+    out.push(`<div style="margin-top:4px;${MUTED}">${esc(s('comments'))}</div>`)
+  }
+
+  // Scanned source documents — a direct path from a scored cell to primary
+  // literature, which is the whole reason this layer beats MRDS.
+  const docs = parseDocs(p.docs)
+  const total = Number(p.doc_count ?? docs.length) || docs.length
+  if (docs.length > 0) {
+    const items = docs
+      .map((d) => {
+        const label = esc([d.title, d.author, d.date].filter(Boolean).join(' — ') || 'document')
+        const href = safeUrl(d.url)
+        return `<li>${href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label}</li>`
+      })
+      .join('')
+    out.push(
+      `<div style="margin-top:5px"><b>Scanned documents</b>` +
+        (total > docs.length ? `<span style="${MUTED}"> (${docs.length} of ${total})</span>` : '') +
+        `<ul style="margin:2px 0 0 14px;padding:0">${items}</ul></div>`
+    )
+  } else if (total > 0) {
+    out.push(`<div style="margin-top:5px;${MUTED}">${total} scanned document(s) on record</div>`)
+  }
+
+  if (s('location_source')) {
+    out.push(`<div style="margin-top:4px;${MUTED}">Source: ${esc(s('location_source'))}</div>`)
+  }
+  return `<div style="${POPUP_WRAP}">${out.join('')}</div>`
+}
+
+/** District popup — production is the point of the layer, so it leads. */
+function districtPopupHtml(p: Record<string, unknown>): string {
+  const s = (k: string) => String(p[k] ?? '').trim()
+  const out: string[] = []
+  out.push(
+    `<div style="font-size:13px;font-weight:600;margin-bottom:2px">${esc(s('name') || 'Unnamed district')}</div>`
+  )
+  const sub = [s('other_name'), s('county') && `${esc(s('county'))} Co.`].filter(Boolean).join(' · ')
+  if (sub) out.push(`<div style="${MUTED};margin-bottom:4px">${sub}</div>`)
+
+  if (s('commodity_primary')) out.push(`<div><b>${esc(s('commodity_primary'))}</b></div>`)
+  if (s('deposit_type')) out.push(`<div>${esc(s('deposit_type'))}</div>`)
+
+  const amount = [s('production_amount'), s('production_unit')].filter(Boolean).join(' ')
+  if (amount || s('production_years')) {
+    out.push(
+      `<div style="margin-top:4px">Production: <b>${esc(amount || 'recorded, amount unstated')}</b>` +
+        (s('production_years') ? `<span style="${MUTED}"> (${esc(s('production_years'))})</span>` : '') +
+        `</div>`
+    )
+  } else {
+    out.push(`<div style="margin-top:4px;${MUTED}">No production recorded in this table</div>`)
+  }
+  if (s('discovery')) out.push(`<div style="${MUTED}">Discovery: ${esc(s('discovery'))}</div>`)
+  if (s('notes')) out.push(`<div style="margin-top:4px;${MUTED}">${esc(s('notes'))}</div>`)
+
+  const links: string[] = []
+  for (const [key, label] of [
+    ['district_link', 'District record'],
+    ['production_link', 'Production record'],
+  ] as const) {
+    const href = safeUrl(p[key])
+    if (href) links.push(`<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+  }
+  if (s('citation')) links.push(`<span style="${MUTED}">${esc(s('citation'))}</span>`)
+  if (links.length > 0) out.push(`<div style="margin-top:5px">${links.join(' · ')}</div>`)
+
+  return `<div style="${POPUP_WRAP}">${out.join('')}</div>`
+}
+
+/**
+ * Which renderer each clickable layer uses. The generic dump is right for
+ * toponyms, IAML and the user's own pins — every field on those is short and
+ * worth seeing verbatim.
+ */
+const POPUP_RENDERERS: Record<string, (p: Record<string, unknown>) => string> = {
+  'toponym-points': popupHtml,
+  'occurrence-points': occurrencePopupHtml,
+  'districts-fill': districtPopupHtml,
+  'iaml-points': popupHtml,
+  'user-sites-points': popupHtml,
+}
+
+/** Layers whose click must yield to a scored cell drawn on top of them. */
+const BLOCKED_BY_RESULTS = new Set(['districts-fill'])
+
+function popupHtml(props: Record<string, unknown>): string {
   const rows = Object.entries(props)
     .filter(([k, v]) => v !== null && v !== '' && k !== 'color')
     .map(

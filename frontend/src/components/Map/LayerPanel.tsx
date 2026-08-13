@@ -12,11 +12,32 @@ interface OverlayDef {
   requires?: string
 }
 
+// Known-ground layers first: they are what you look at while deciding where to
+// put a polygon, and what tells you whether a hot cell is a re-discovery.
 const OVERLAYS: OverlayDef[] = [
   {
-    id: 'plss',
-    label: 'PLSS sections',
-    hint: 'Township / range / section — how claims are described',
+    id: 'occurrences',
+    label: 'Known occurrences',
+    hint: 'WA DNR sites — size = production/assays, halo = position error',
+    requires: 'occurrences',
+  },
+  {
+    id: 'districts',
+    label: 'Mining districts',
+    hint: 'WA DNR district polygons — stronger fill where production is recorded',
+    requires: 'districts',
+  },
+  {
+    id: 'iaml',
+    label: 'Adits & shafts (IAML)',
+    hint: 'Abandoned mine lands inventory — yellow rim means a recorded hazard',
+    requires: 'iaml',
+  },
+  {
+    id: 'user_sites',
+    label: 'My Sites',
+    hint: 'Imported field pins — cyan ring = not in any database',
+    requires: 'user_sites',
   },
   {
     id: 'toponyms',
@@ -25,10 +46,9 @@ const OVERLAYS: OverlayDef[] = [
     requires: 'toponyms',
   },
   {
-    id: 'occurrences',
-    label: 'Known occurrences',
-    hint: 'MRDS / WA DNR recorded sites',
-    requires: 'occurrences',
+    id: 'plss',
+    label: 'PLSS sections',
+    hint: 'Township / range / section — how claims are described',
   },
   {
     id: 'wilderness',
@@ -48,6 +68,7 @@ export default function LayerPanel() {
     basemap, setBasemap,
     resultsOpacity, setResultsOpacity,
     resultsVisible, setResultsVisible,
+    noveltyOutlines, setNoveltyOutlines,
     overlays, toggleOverlay,
     availableLayers, setAvailableLayers,
     analysisResults,
@@ -144,6 +165,19 @@ export default function LayerPanel() {
         />
         <div className="text-[10px] text-gray-400 mt-0.5">
           Fade results to read the terrain underneath
+        </div>
+
+        <label className="flex items-center gap-2 mt-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={noveltyOutlines}
+            onChange={(e) => setNoveltyOutlines(e.target.checked)}
+            disabled={!resultsVisible}
+          />
+          <span className={resultsVisible ? '' : 'opacity-40'}>Novelty outlines</span>
+        </label>
+        <div className="text-[10px] text-gray-400 mt-0.5">
+          Outline each cell by whether anything is already recorded there
         </div>
       </section>
 

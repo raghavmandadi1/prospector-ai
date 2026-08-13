@@ -1,4 +1,6 @@
 import { useAppStore } from '../../store'
+import { NOVELTY, NOVELTY_ORDER } from '../../types'
+import type { NoveltyClass } from '../../types'
 
 export default function ResultsOverlay() {
   const { analysisResults, currentJob, targetMineral, shadingMode, setShadingMode } = useAppStore()
@@ -10,6 +12,22 @@ export default function ResultsOverlay() {
   const interpolated = analysisResults.some((c) => c.parent_cell_id)
   const mineral = (currentJob?.target_mineral ?? targetMineral)?.toUpperCase()
 
+  // Novelty is optional: absent on older runs and wherever the occurrence
+  // extract was never built. If no cell carries it, the whole block stays off
+  // rather than showing three zeroes that look like a finding.
+  const noveltyCounts = analysisResults.reduce(
+    (acc, c) => {
+      if (c.novelty && c.novelty in acc) acc[c.novelty] += 1
+      return acc
+    },
+    { lead: 0, extends: 0, confirms: 0 } as Record<NoveltyClass, number>
+  )
+  const hasNovelty = NOVELTY_ORDER.some((c) => noveltyCounts[c] > 0)
+  // The headline number: high-scoring ground with nothing recorded near it.
+  const highLeads = analysisResults.filter(
+    (c) => c.tier === 'high' && c.novelty === 'lead'
+  ).length
+
   return (
     <>
       {/* Results summary bar */}
@@ -18,6 +36,14 @@ export default function ResultsOverlay() {
         <span className="text-gray-400">{analysisResults.length} cells</span>
         <span className="text-red-400">{highCount} high</span>
         <span className="text-orange-400">{medCount} medium</span>
+        {hasNovelty && (
+          <span
+            style={{ color: NOVELTY.lead.color }}
+            title="High-scoring cells with nothing recorded nearby — leads rather than re-discoveries"
+          >
+            {highLeads} novel
+          </span>
+        )}
       </div>
 
       {/* Legend */}
@@ -82,6 +108,35 @@ export default function ResultsOverlay() {
           <p className="text-[10px] text-gray-500 leading-snug mt-1">
             Fine cells interpolated from a coarser analysis grid.
           </p>
+        )}
+
+        {/* Novelty — a separate axis from score, and drawn in a separate
+            channel (cell outline, not fill) for exactly that reason. */}
+        {hasNovelty && (
+          <div className="mt-2 pt-2 border-t border-gray-700">
+            <div className="font-medium text-gray-300 mb-1.5">
+              Novelty <span className="text-gray-500 font-normal">— cell outline</span>
+            </div>
+            {NOVELTY_ORDER.map((cls) => (
+              <div key={cls} className="flex items-start gap-2 mb-1">
+                <span
+                  className="w-4 flex-shrink-0 mt-[7px]"
+                  style={{
+                    borderTop: `2px ${NOVELTY[cls].borderStyle} ${NOVELTY[cls].color}`,
+                  }}
+                />
+                <span className="text-[10px] leading-snug">
+                  <span className="text-gray-200">{NOVELTY[cls].label}</span>
+                  <span className="text-gray-500 tabular-nums"> · {noveltyCounts[cls]}</span>
+                  <span className="block text-gray-500">{NOVELTY[cls].blurb}</span>
+                </span>
+              </div>
+            ))}
+            <p className="text-[10px] text-gray-500 leading-snug mt-1">
+              Fill is the score, outline is whether anything is already recorded
+              there. Cells with no outline were never checked.
+            </p>
+          </div>
         )}
       </div>
     </>
