@@ -249,11 +249,18 @@ def load_gnis(path: Optional[Path] = None) -> List[ToponymName]:
 
 
 def _km_between(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
-    """Equirectangular approximation — accurate to well under 1% at AOI scale."""
-    mean_lat = math.radians((lat1 + lat2) / 2)
-    dx = (lon2 - lon1) * math.cos(mean_lat) * 111.32
-    dy = (lat2 - lat1) * 110.57
-    return math.hypot(dx, dy)
+    """Equirectangular approximation — accurate to well under 1% at AOI scale.
+
+    Delegates to ``app.spatial.geometry`` so there is exactly one definition of
+    "how far apart are these two points" in the codebase. It used to carry its own
+    copy of the constants, rounded slightly differently (110.57 vs 110.574 km per
+    degree of latitude), which made toponym corroboration distances and occurrence
+    distances disagree by ~36 ppm. Harmless at that size, but two modules
+    disagreeing about distance is not a property worth keeping.
+    """
+    from app.spatial.geometry import km_between
+
+    return km_between(lon1, lat1, lon2, lat2)
 
 
 def match_names(
