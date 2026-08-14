@@ -1,10 +1,18 @@
 """
 End-to-end smoke test for run cancellation and telemetry.
 
-This is deliberately a plain script, not pytest — the repo has no test
-infrastructure yet and this needs to run against a live uvicorn process to
-prove the thing it claims (that closing the HTTP stream actually stops the
-agents, rather than leaving them burning tokens until they finish).
+This is deliberately a plain script, not pytest, because it needs a live
+uvicorn process to prove the thing it claims — that closing the HTTP stream
+actually stops the agents, rather than leaving them burning tokens until they
+finish.
+
+(The original reason given here was "the repo has no test infrastructure yet".
+That is no longer true — there are 195 pytest tests. The live-uvicorn
+requirement is the reason it stays a script.)
+
+NOT COLLECTED BY PYTEST, for the same reason as test_run_telemetry.py: the work
+is in main(), so `pytest backend/tests` reports "no tests collected" here and a
+green suite says nothing about this file.
 
 Run:  python3 backend/tests/test_run_cancellation.py
 Needs: fastapi uvicorn httpx anthropic shapely pyproj pydantic-settings
@@ -160,17 +168,32 @@ def main() -> int:
     else:
         print(f"  FAIL: lithology grounding wrong: {lith}")
         ok = False
-    if struct and struct.get("knowledge_file") is None:
-        print("  PASS: structure reported as ungrounded (system=None)")
+    # Inverted 2026-08-13: this used to assert knowledge_file is None as a
+    # tripwire on Known Gap #1. The gap closed, so the assertion now pins the
+    # fixed state instead of the broken one.
+    if struct and struct.get("knowledge_file") == "structure/gold.md":
+        print("  PASS: structure reported as grounded")
     else:
         print(f"  FAIL: structure grounding wrong: {struct}")
         ok = False
 
+    # Also inverted. This used to treat a spatial-context error as the PASS
+    # case, because the PostGIS query was the only source and it always died on
+    # the dev path (Known Gap #2). Local files now serve context in both modes,
+    # and `_error` is set only when NO source produced anything — so an error
+    # here is a real failure, not the expected dev state.
     ctx = next((e for e in events if e["event"] == "spatial_context"), None)
-    if ctx and ctx.get("error"):
-        print(f"  PASS: spatial-context failure surfaced: {ctx['error'][:60]}")
-    elif ctx:
-        print("  NOTE: spatial context succeeded (database reachable)")
+    if ctx is None:
+        print("  FAIL: no spatial_context event emitted")
+        ok = False
+    elif ctx.get("error"):
+        print(f"  FAIL: no spatial source produced anything: {ctx['error'][:80]}")
+        ok = False
+    else:
+        print(
+            "  PASS: spatial context built "
+            f"(sources={ctx.get('sources')}, cells_with_facts={ctx.get('cells_with_facts')})"
+        )
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1

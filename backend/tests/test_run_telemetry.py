@@ -5,6 +5,13 @@ Companion to test_run_cancellation.py. Asserts the token ledger adds up, that
 batch parse health is reported honestly, and that a truncated response is
 flagged rather than silently repaired.
 
+NOT COLLECTED BY PYTEST. There is no test function here — the work happens in
+main() behind `if __name__ == "__main__"`, so `pytest backend/tests` reports
+"no tests collected" for this file and a green suite says nothing about it.
+It needs a live uvicorn, so it stays hand-run. Verify with:
+
+    pytest backend/tests/test_run_telemetry.py --collect-only -q
+
 Run:  python3 backend/tests/test_run_telemetry.py
 """
 import asyncio
@@ -166,9 +173,15 @@ def main() -> int:
             abs(usage["est_cost_usd"] - expected_cost) < 1e-6,
             f"cost estimate correct (${usage['est_cost_usd']:.4f} vs ${expected_cost:.4f})",
         )
+        # Inverted 2026-08-13. This used to assert == ["structure"] as a
+        # deliberate tripwire on Known Gap #1. The gap closed — all six agents
+        # have knowledge/<domain>/gold.md — so the tripwire fired and was
+        # rewritten to assert the fixed state, per the convention in CLAUDE.md
+        # ("canary tests are inverted, not deleted, when a gap closes"). The
+        # gap reopening is still a failure.
         check(
-            usage["ungrounded_agents"] == ["structure"],
-            f"ungrounded agents identified: {usage['ungrounded_agents']}",
+            usage["ungrounded_agents"] == [],
+            f"no agent runs ungrounded: {usage['ungrounded_agents']}",
         )
         per_agent_in = sum(u["input_tokens"] for u in usage["by_agent"].values())
         check(per_agent_in == usage["input_tokens"], "per-agent usage sums to the job total")
