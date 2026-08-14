@@ -117,9 +117,18 @@ Consequences, in order:
    corridor, those two agents are back on model prior — 0.55 of the gold weight. The
    occurrence, district, IAML and toponym evidence *is* statewide and does cover it, so
    those AOIs are far better served than before, just not on geology.
-3. The obvious fix is WA DNR's **1:100,000 statewide surface geology**, a different
-   download that is not in `data/raw/`. `macrostrat.py` is a working connector and could
-   fill the same gap live, at lower resolution.
+3. The fix is WA DNR's **1:100,000 statewide surface geology**, and as of 2026-08-13 it is
+   **measured, decided and specced** — see [`docs/08_geology_source_decision.md`](docs/08_geology_source_decision.md).
+   It is a live ArcGIS service (`Public_Geology/100K_Surface_Geology_WA_GeMS`), not a
+   download. Over the corridor bbox it returns **100% lattice coverage against the 24k's 13%**,
+   with **309 faults where 24k has none**. Median boundary vertex spacing is 70.5 m, so it is
+   ample for 1000–2000 m analysis cells and *not* usable for the 25 m creek-scale buffer that
+   "Steps for Raghav 3.0" §47.1 proposes. Two traps: only 39% of corridor features join the
+   on-disk `unit` lexicon by raw code (58% after stripping the quad-local `(...)` suffix), so
+   classify by **code prefix** instead — that is complete; and `wtr` is 25% of all corridor
+   polygons and must be an explicit water class, not an unknown.
+   `macrostrat.py` is **not** a usable fallback — it imports `geoalchemy2` at module scope,
+   which is not installed.
 
 None of this is silent. `coverage` in the `spatial_context` event and
 `inputs.spatial_coverage` in the run record report per-AOI polygon, structure, WofE,
@@ -129,7 +138,7 @@ different claims and the code keeps them apart.
 
 ### 3. Tests — `engine.py`'s maths is covered now
 
-`pytest` is installed and **159 tests pass**:
+`pytest` is installed and **195 tests pass**:
 
 ```bash
 .venv/bin/python -m pytest backend/tests -q
@@ -169,8 +178,19 @@ Two older standalone smoke scripts are still run by hand and need a live uvicorn
 - `test_run_cancellation.py` — holds fake LLM calls open, closes the HTTP stream mid-run,
   and asserts no call completes or starts afterwards.
 
-Both also assert live that spatial context is dead (Known Gap #2) and that `structure` runs
-ungrounded (Known Gap #1) — they will start failing when those are fixed, which is the point.
+Both used to assert live that spatial context is dead (Known Gap #2) and that `structure` runs
+ungrounded (Known Gap #1). **Both gaps closed and both assertions were inverted on
+2026-08-13**, per the convention below — `structure` is now asserted grounded, and a
+`spatial_context` error is now a failure rather than the expected dev state.
+
+**Neither file is collected by pytest.** Both do their work in `main()` behind
+`if __name__ == "__main__"`, so `pytest backend/tests` reports "no tests collected" for them
+and the green 195 says nothing about either. That is why the stale assertions survived a day
+past the fix that should have fired them. Verify with:
+
+```bash
+.venv/bin/python -m pytest backend/tests/test_run_telemetry.py backend/tests/test_run_cancellation.py --collect-only -q
+```
 
 `npm run lint` still fails (eslint neither installed nor configured); use `npm run typecheck`.
 
@@ -386,6 +406,77 @@ Building the artifacts (all read `data/raw/`, all idempotent):
 which are not overlays — they back the per-cell evidence and the run log needs to be able to
 say whether they were present.
 
+### Regional sweeps — tiles, halos, and the two traps
+
+`backend/app/sweeps/` tiles a corridor into analysis-sized blocks on the fixed grid so a
+whole region can be swept and ranked as one map, instead of one polygon at a time. Two
+things here are counter-intuitive and both fail silently if undone.
+
+**Never build a tile's cells with `generate_grid()`.** It admits any cell whose square
+merely *touches* the AOI, and a tile polygon additionally makes a 5070 → WGS84 → 5070 round
+trip. Measured at the corridor anchor at 1000 m, a nominal 10×10 = 100-cell tile comes back
+as **110**, and a 12×12 halo tile as **156** — over `MAX_LLM_CELLS = 150`, which trips the
+coarsening loop in `run_analysis` and **halves the resolution of the entire sweep**, logged
+only at INFO. Tiles are built from `make_cell_id` / `cell_polygon_wgs84` instead, giving
+exactly 100 + 44 = 144. `orchestrator.run_analysis` takes `config["tile"]` and rebuilds the
+grid from those ids, bypassing both coarsening loops.
+
+Note the two concerns are different: *region* cell selection in `tiles_for_region` mirrors
+`generate_grid` exactly and works entirely in EPSG:5070 — doing it in WGS84 silently drops
+85 corridor cells.
+
+**The halo is prompt context, not cells.** "Steps for Raghav 3.0" §38 describes scoring halo
+cells and discarding them, but the prompt unit is `BATCH_SIZE = 50`, not the tile, and
+batches form over the *cache-filtered* list — so a halo cell may not even share a prompt with
+the edge cell it exists to contextualise. Halo cells travel as
+`spatial_context["context_cells"]`, render under an `n1..nM` label namespace, and are never
+batched, scored or cached. The exclusion is **structural**: `parse_llm_response` builds its
+label map from the batch only, so an `n3` echoed back matches nothing.
+
+Two traps that cost real money if missed, both pinned by tests:
+
+- `context_cells` **must** stay in the denylist in `BaseAgent._cell_context` — that filter
+  sweeps in any list-valued context key, and folding a per-tile halo into the cache key would
+  mean the same cell never shares a hit between a sweep and a drawn AOI.
+- `_build_spatial_context` writes everything it is handed into `spatial_context["grid_cells"]`,
+  and `BaseAgent.run()` takes its work list from exactly that key — so the orchestrator puts
+  the core back after building facts for core + halo, and recomputes the `coverage` counts
+  over core cells only.
+
+**Running a sweep — one HTTP request per tile.** `POST /sweeps` creates a manifest and
+spends nothing; the client then POSTs `/sweeps/{id}/tiles/{tile_id}/run` for each pending
+tile, streaming that tile's SSE on the response. Pause is "stop asking for the next tile" and
+needs no job registry; Stop aborts the fetch, which is the same real cancellation the
+single-AOI path already had. The cost is that closing the tab stops the sweep — so the
+manifest is rewritten atomically after every tile transition and an interrupted tile goes
+back to **`pending`, not `failed`**, making resume cost at most one tile.
+
+**Never trust `run_analysis` returning cleanly as a tile-success signal.** It calls
+`recorder.set_status("completed")` unconditionally, and there is a record on disk with all
+six agents failed, `llm_calls: 0`, and status `completed`. `manifest.classify_tile()` decides
+from what was actually produced: at least one agent completed **and** at least one cell with
+confidence > 0. A grid of zero-confidence placeholders renders as barren ground, not as a
+failure, so this is the difference between a resumable sweep and a corridor silently marked
+done having scored nothing.
+
+**Estimate from the tile-size distribution, never from area.** Per-tile overhead does not
+scale with tile size — a tile pays one `build_local_context()` and one batch per agent
+whether it holds 2 cells or 50. The grid origin is fixed, so a region straddling block
+boundaries produces ragged tiles: the proxy corridor at 2000 m is 6 tiles for 137 cells,
+three of them holding ≤3 cells, costing **2.33× a perfectly packed region**. `estimate.py`
+reports that ratio as `raggedness_overhead` and the UI shows it, because a slightly different
+outline can be materially cheaper. Estimates carry `basis: "default" | "measured"` — the
+per-batch token and wall-clock figures are guesses until a real tile is measured.
+
+**Normalization scope.** `normalize_relative(cells, scope="aoi"|"region")` records what the
+percentile was computed over on every cell (`ScoredCell.normalization_scope`). A sweep
+normalizes **once over the whole region after every tile completes** — per-tile normalization
+makes the best cell of a barren tile "high" and stitches into a map with checkerboard
+artifacts following the tile grid rather than the geology. Tiles still normalize as `aoi` on
+the way through and are overwritten at region scope, so no cell ever exists with null
+relative fields (the map's shading expression coalesces `relative_score` → `score`, so a null
+renders as a plausible map answering a different question).
+
 ### SSE event contract
 
 Both paths emit the same JSON payloads (`{"event": "<name>", ...}`); dev sends them on the
@@ -408,6 +499,9 @@ in the `default` branch as "Unhandled event".
 | `usage` | orchestrator | job token totals, `est_cost_usd`, `by_agent`, `ungrounded_agents` |
 | `results` | `analysis_dev.py` | `final_scores`, `agent_results` (dev path only) |
 | `job_complete` / `error` | orchestrator | terminal |
+| `tile_started` | `api/sweeps.py` | `sweep_id`, `tile_id` — sweep path only |
+| `tile_complete` | `api/sweeps.py` | tile `status`, `cells_scored`, `reason`, sweep `totals`, `remaining` |
+| `sweep_complete` | `api/sweeps.py` | fired on the last tile, after region-wide normalization |
 
 Telemetry is best-effort: `BaseAgent._emit()` swallows emitter exceptions so a broken
 stream can never fail a run. It re-raises `CancelledError` — that is the stop signal, not
@@ -470,6 +564,13 @@ prospector-ai/
 │       │   ├── wofe_grid.py          ← OF-00-495 on the ladder + published OF01-501 contrasts
 │       │   ├── user_sites.py         ← field pins; enforces "a truth pin never reaches a model"
 │       │   └── local_store.py        ← build_local_context() → per-cell facts + coverage
+│       ├── sweeps/                   ← REGIONAL TILING (Workstream 5)
+│       │   ├── tiles.py              ← tiles by INDEX ARITHMETIC, never generate_grid
+│       │   ├── manifest.py           ← resume state + classify_tile(): never trust a clean return
+│       │   ├── estimate.py           ← cost AND time, from the tile-size distribution
+│       │   ├── runner.py             ← one tile at a time; region-normalize once at the end
+│       │   └── diff.py               ← which cells moved between two sweeps
+│       ├── export.py                 ← CSV + DD/DMS/UTM coords (shared with Workstream 6)
 │       ├── toponyms/matcher.py       ← deterministic GNIS matcher, stream-aware, capped
 │       ├── runs/record.py            ← RunRecorder: provenance, inputs, outputs, raw LLM
 │       ├── cache/cell_cache.py       ← SQLite per-cell score cache
@@ -502,7 +603,7 @@ prospector-ai/
 │       │   └── agent_result.py      ← AgentResult + ScoredCell Pydantic models
 │       ├── db/session.py
 │       └── config.py
-├── backend/tests/                   ← pytest (62 tests) + two hand-run smoke scripts
+├── backend/tests/                   ← pytest (195 tests) + two hand-run smoke scripts
 │   ├── test_grid.py                 ← fixed-grid acceptance criteria, statewide coverage
 │   ├── test_run_record_and_cache.py ← cache hit/miss/invalidation, no-secrets, no relative fields
 │   ├── test_orchestrator_integration.py ← whole pipeline with a stubbed LLM
@@ -867,7 +968,7 @@ difference between an artifact existing and it covering your AOI — the run log
 ### Testing
 
 ```bash
-.venv/bin/python -m pytest backend/tests -q      # 159 tests, ~30 s, no network, no API key
+.venv/bin/python -m pytest backend/tests -q      # 195 tests, ~30 s, no network, no API key
 ```
 
 "It ran without an exception" is no longer the bar — that bar let the all-zero-scores bug in
@@ -1059,7 +1160,7 @@ assay-primacy rule from an inference into a lookup; toponym corroboration works 
 time; known mines and districts are on the map with uncertainty halos scaled to each record's
 positional accuracy; every scored cell carries a `novelty` flag so a re-discovery is
 distinguishable from a lead; field pins import from KML/GPX with a `role` field that keeps
-`truth` pins away from the model. 62 tests → 161. Known Gaps #1 and #5 closed, #2 defanged, #3
+`truth` pins away from the model. 62 tests → 195. Known Gaps #1 and #5 closed, #2 defanged, #3
 closed. **New Known Gap #2b**, and it is the important one: the 1:24k geology is a
 342-quadrangle mosaic and covers exactly one of the eleven benchmark AOIs, so west of the crest
 lithology and structure are still ungrounded — but the run now says so instead of looking

@@ -465,6 +465,66 @@ def test_absolute_scores_are_never_mutated():
     assert [c.relative_score for c in again] == [0.0, 0.137, 0.5, 0.86, 1.0]
 
 
+# ---------------------------------------------------------------------------
+# normalization scope (§39)
+# ---------------------------------------------------------------------------
+
+
+def test_scope_defaults_to_aoi_and_is_recorded_on_every_cell():
+    annotated = normalize_relative(cells(0.1, 0.5, 0.9))
+    assert all(c.normalization_scope == "aoi" for c in annotated)
+
+
+def test_scope_is_recorded_but_changes_no_arithmetic():
+    """The parameter says what the numbers were computed over. It must not
+    change them, or a region-normalized map and an AOI-normalized map of the
+    same cells would differ for two reasons at once and neither could be
+    debugged."""
+    values = [0.0, 0.2, 0.55, 0.8, 1.0]
+    a = normalize_relative(cells(*values), scope="aoi")
+    b = normalize_relative(cells(*values), scope="region")
+    assert [c.relative_score for c in a] == [c.relative_score for c in b]
+    assert [c.percentile for c in a] == [c.percentile for c in b]
+    assert [c.tier for c in a] == [c.tier for c in b]
+    assert all(c.normalization_scope == "region" for c in b)
+
+
+def test_renormalizing_a_tile_at_region_scope_overwrites_the_tile_scope():
+    """The sweep sequence: each tile normalizes as it completes, then the whole
+    region is normalized once at the end. The second pass must win everywhere,
+    or a map carries a mix of scopes and its legend is lying about some of it."""
+    tile = normalize_relative(cells(0.1, 0.2), scope="aoi")
+    assert all(c.normalization_scope == "aoi" for c in tile)
+    region = normalize_relative(tile + cells(0.9, 1.0), scope="region")
+    assert all(c.normalization_scope == "region" for c in region)
+
+
+def test_the_same_cell_can_change_tier_when_the_scope_widens():
+    """The reason scope has to be recorded at all.
+
+    A cell that is the best of a barren tile is not the best of the corridor.
+    Both answers are correct; they are answers to different questions.
+    """
+    barren = cells(0.10, 0.11, 0.12, 0.13, 0.14)
+    top_of_tile = normalize_relative([c.model_copy() for c in barren])[-1]
+    assert top_of_tile.tier == "high"
+
+    in_region = normalize_relative(
+        [c.model_copy() for c in barren] + cells(0.7, 0.8, 0.9, 0.95, 1.0),
+        scope="region",
+    )[4]
+    assert in_region.score == 0.14
+    assert in_region.tier != "high", "0.14 cannot be top decile of the corridor"
+
+
+def test_an_unknown_scope_is_refused():
+    """A typo'd scope must not silently label a map with a claim nobody checked."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        normalize_relative(cells(0.1, 0.2), scope="global")
+
+
 # ===========================================================================
 # synthesize
 # ===========================================================================

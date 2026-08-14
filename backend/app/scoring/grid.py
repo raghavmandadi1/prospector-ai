@@ -29,7 +29,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from shapely.geometry import shape, box, mapping
 from shapely.ops import transform, unary_union
@@ -193,6 +193,38 @@ def cell_id_to_bbox(cell_id: str) -> Tuple[float, float, float, float]:
 def cell_id_to_geojson(cell_id: str) -> Dict[str, Any]:
     res, col, row = parse_cell_id(cell_id)
     return mapping(cell_polygon_wgs84(col, row, res))
+
+
+def cells_from_ids(cell_ids: Iterable[str]) -> List["GridCell"]:
+    """GridCells for an explicit list of ids — no AOI, no clipping.
+
+    The sweep path needs this. A tile's cell set comes from index arithmetic
+    (``app.sweeps.tiles``), not from intersecting a polygon, because handing a
+    tile-shaped polygon back to ``generate_grid`` inflates the count past
+    ``MAX_LLM_CELLS`` and silently coarsens the run. Rebuilding cells from their
+    ids keeps the tile exactly the size the tiler computed.
+
+    ``display_geometry`` is the canonical square rather than a clipped one:
+    clipping to a tile boundary would draw the tile grid on the map, which is an
+    artifact of how the work was divided and not a fact about the ground.
+    """
+    cells: List[GridCell] = []
+    for cid in cell_ids:
+        res, col, row = parse_cell_id(cid)
+        square = cell_polygon_wgs84(col, row, res)
+        geom = mapping(square)
+        cells.append(
+            GridCell(
+                cell_id=cid,
+                geometry=geom,
+                display_geometry=geom,
+                bbox=square.bounds,
+                resolution_m=res,
+                col=col,
+                row=row,
+            )
+        )
+    return cells
 
 
 def parent_cell_id(cell_id: str, parent_resolution_m: int) -> str:

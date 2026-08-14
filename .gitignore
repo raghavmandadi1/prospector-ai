@@ -59,6 +59,10 @@ data/raw/
 # raw-LLM blocks make them large. benchmarks/baselines/ IS tracked; these are not.
 data/runs/
 data/cache/
+# Sweep manifests and their merged cell sets. Same reasoning as run records —
+# machine-generated and per-developer — and a swept corridor's cells file runs
+# to megabytes of evidence strings.
+data/sweeps/
 
 # Derived spatial stores, built from data/raw/ by scripts/build_*.py. Large
 # (the geology store is a substantial fraction of the 218 MB source), fully

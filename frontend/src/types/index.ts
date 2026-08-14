@@ -14,6 +14,25 @@
  */
 export type NoveltyClass = 'confirms' | 'extends' | 'lead'
 
+/**
+ * Which population a cell's relative_score / percentile / tier were computed
+ * over.
+ *
+ *   aoi    — one hand-drawn polygon. "Top 10% of what you drew."
+ *   region — a whole regional sweep, normalized once after every tile finished.
+ *            "Top 10% of the corridor."
+ *
+ * These are different claims and the second is the more useful one, but only if
+ * the UI says which is on screen. Absent means an older run that predates the
+ * field; treat it as 'aoi', which is what it was.
+ */
+export type NormalizationScope = 'aoi' | 'region'
+
+export const NORMALIZATION_SCOPE_LABEL: Record<NormalizationScope, string> = {
+  aoi: 'this area',
+  region: 'the whole sweep',
+}
+
 export interface NoveltyMeta {
   label: string
   /** One sentence, shown in the legend and the evidence drawer. */
@@ -69,14 +88,28 @@ export const NOVELTY_ORDER: NoveltyClass[] = ['lead', 'extends', 'confirms']
 export interface ScoredCell {
   cell_id: string
   geometry: GeoJSON.Geometry
-  score: number           // 0.0–1.0 absolute composite
+  /** Absolute composite, 0.0–1.0. The ONLY field comparable across runs —
+   *  everything relative below is scoped to one AOI or one sweep. Anything that
+   *  merges results from separate runs (the cached-coverage layer, a catchment
+   *  rollup) must read this and never relative_score. */
+  score: number
   confidence: number      // 0.0–1.0
   evidence: string[]
   data_sources_used: string[]
-  // AOI-relative fields (set by the scoring engine)
-  relative_score?: number // min-max stretch within this AOI, 0–1
-  percentile?: number     // rank within this AOI, 0–1
+  // Relative fields (set by the scoring engine). Scoped — see
+  // normalization_scope below; they are NOT comparable across runs.
+  relative_score?: number // min-max stretch within the scope, 0–1
+  percentile?: number     // rank within the scope, 0–1
   tier?: 'high' | 'medium' | 'low' | 'negligible'
+  /** Which population the three fields above were computed over.
+   *
+   *  'aoi'    — a single hand-drawn polygon
+   *  'region' — a whole regional sweep, normalized once after all tiles finish
+   *
+   *  The same cell can be 'high' in a barren AOI and 'low' in the corridor that
+   *  contains it, and both are right — they answer different questions. The
+   *  legend must say which, or "high priority" means nothing in particular. */
+  normalization_scope?: NormalizationScope
   // Set when this cell was interpolated from a coarser analysis grid
   parent_cell_id?: string
   // ---- Novelty (optional — see NoveltyClass) -------------------------------

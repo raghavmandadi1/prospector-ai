@@ -105,6 +105,27 @@ async def test_full_run_produces_scores_and_a_record(stubbed):
     # meaningless, so the census is asserted rather than merely stored.
     assert doc["provenance"]["pin_roles_active"].get("truth", 0) == 0
 
+    # GROUNDED IS NOT COVERED. The assertion above says every agent loaded a
+    # knowledge file; it says nothing about whether any *data* reached them.
+    # "Steps for Raghav 3.0" §34 gates a regional sweep on grounding for exactly
+    # the right reason — a sweep multiplies whatever the agents are — but on the
+    # wrong variable: all six agents have been grounded since 2026-08-12 while
+    # the priority corridor still had zero mapped geology (Known Gap #2b).
+    #
+    # So the real tripwire is coverage, and the thing that must never break is
+    # that coverage is *reported per run* rather than assumed. A run that scored
+    # nothing but model prior and a run that scored on 300 faults must be
+    # distinguishable after the fact, from the record alone.
+    coverage = doc["inputs"]["spatial_coverage"]
+    assert isinstance(coverage, dict), "coverage must be recorded, not assumed"
+    for key in ("cells_total", "cells_with_geology", "cells_with_structures"):
+        assert key in coverage, f"run record must report {key}"
+        assert isinstance(coverage[key], int)
+    # cells_with_geology <= cells_total is the invariant that makes the ratio
+    # meaningful; a count that can exceed the denominator is a counting bug.
+    assert coverage["cells_with_geology"] <= coverage["cells_total"]
+    assert coverage["cells_with_structures"] <= coverage["cells_total"]
+
 
 async def test_second_identical_run_costs_nothing(stubbed):
     counter, tmp_path = stubbed

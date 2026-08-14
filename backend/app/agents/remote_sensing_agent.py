@@ -85,6 +85,9 @@ class RemoteSensingAgent(BaseAgent):
     ) -> str:
         grid_cells = spatial_context.get("grid_cells", [])
         cell_facts = spatial_context.get("cell_facts", {})
+        # Halo cells of a sweep tile, if this is one. Empty for a
+        # hand-drawn AOI, which keeps that prompt byte-identical.
+        context_cells = spatial_context.get("context_cells") or []
 
         per_cell = cell_facts_block(
             grid_cells,
@@ -97,6 +100,7 @@ class RemoteSensingAgent(BaseAgent):
                 "have not seen a spectral signature and must not describe one as "
                 "observed."
             ),
+            context_cells=context_cells,
         )
 
         sections = [

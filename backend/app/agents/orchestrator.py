@@ -24,6 +24,7 @@ from app.models.agent_result import AgentResult
 from app.runs.record import RunRecorder, provenance_block
 from app.scoring.engine import synthesize, normalize_relative
 from app.scoring.grid import (
+    cells_from_ids,
     coarsen,
     generate_grid,
     interpolate_to_fine_grid,
@@ -140,26 +141,58 @@ class OrchestratorAgent:
             requested_resolution_m = snap_to_ladder(config.get("resolution_m", 1000))
             resolution_m = requested_resolution_m
 
-            # Cap the display grid size (a 125 m grid over a large AOI can
-            # produce tens of thousands of polygons)
-            display_cells = generate_grid(aoi_geojson, resolution_m)
-            while len(display_cells) > MAX_DISPLAY_CELLS and coarsen(resolution_m) != resolution_m:
-                resolution_m = coarsen(resolution_m)
-                display_cells = generate_grid(aoi_geojson, resolution_m)
-            if resolution_m != requested_resolution_m:
-                logger.info(
-                    f"[{job_id}] Display resolution coarsened to "
-                    f"{resolution_m}m to stay under {MAX_DISPLAY_CELLS} cells"
+            # --- sweep tile seam ---------------------------------------------
+            # A sweep tile arrives with its cell set already decided by index
+            # arithmetic, and must NOT be re-derived from a polygon: handing a
+            # tile-shaped polygon to generate_grid returns more cells than the
+            # block contains (measured 110 for 10x10, 156 for a 12x12 halo), and
+            # 156 trips the MAX_LLM_CELLS coarsening below — halving the
+            # resolution of the whole sweep with only an INFO log to show for it.
+            #
+            # So when a tile is supplied the grid is rebuilt from its ids and
+            # both coarsening loops are skipped entirely. The tiler already
+            # guaranteed the tile fits.
+            tile = config.get("tile")
+            if tile:
+                grid_cells = cells_from_ids(tile["core_cell_ids"])
+                analysis_resolution_m = (
+                    grid_cells[0].resolution_m if grid_cells else resolution_m
                 )
+                resolution_m = analysis_resolution_m
+                display_cells = grid_cells
+                logger.info(
+                    "[%s] Tile %s: %d core cells at %d m, %d halo cells as context "
+                    "(grid generation and coarsening bypassed)",
+                    job_id,
+                    tile.get("tile_id"),
+                    len(grid_cells),
+                    analysis_resolution_m,
+                    len(tile.get("halo_cell_ids") or []),
+                )
+            else:
+                # Cap the display grid size (a 125 m grid over a large AOI can
+                # produce tens of thousands of polygons)
+                display_cells = generate_grid(aoi_geojson, resolution_m)
+                while (
+                    len(display_cells) > MAX_DISPLAY_CELLS
+                    and coarsen(resolution_m) != resolution_m
+                ):
+                    resolution_m = coarsen(resolution_m)
+                    display_cells = generate_grid(aoi_geojson, resolution_m)
+                if resolution_m != requested_resolution_m:
+                    logger.info(
+                        f"[{job_id}] Display resolution coarsened to "
+                        f"{resolution_m}m to stay under {MAX_DISPLAY_CELLS} cells"
+                    )
 
-            analysis_resolution_m = resolution_m
-            grid_cells = generate_grid(aoi_geojson, analysis_resolution_m)
-            while (
-                len(grid_cells) > MAX_LLM_CELLS
-                and coarsen(analysis_resolution_m) != analysis_resolution_m
-            ):
-                analysis_resolution_m = coarsen(analysis_resolution_m)
+                analysis_resolution_m = resolution_m
                 grid_cells = generate_grid(aoi_geojson, analysis_resolution_m)
+                while (
+                    len(grid_cells) > MAX_LLM_CELLS
+                    and coarsen(analysis_resolution_m) != analysis_resolution_m
+                ):
+                    analysis_resolution_m = coarsen(analysis_resolution_m)
+                    grid_cells = generate_grid(aoi_geojson, analysis_resolution_m)
             if analysis_resolution_m != resolution_m:
                 logger.info(
                     f"[{job_id}] Display resolution {resolution_m}m → analysis "
@@ -188,9 +221,43 @@ class OrchestratorAgent:
 
             # 2. Build spatial context for each agent domain (local files, then
             #    PostGIS on top where it is reachable)
+            #
+            # A tile's halo cells go through the SAME context build as its core,
+            # so `cell_facts` covers them and the prompt can show a neighbour's
+            # real geology rather than a placeholder. They are then handed over
+            # separately as `context_cells`, which is what keeps them out of the
+            # batching, the scoring and the cache (see base_agent.neighbour_label
+            # and _cell_context).
+            halo_cells = cells_from_ids(tile["halo_cell_ids"]) if tile else []
             spatial_context = await self._build_spatial_context(
-                aoi_geojson, grid_cells, target_mineral
+                aoi_geojson, grid_cells + halo_cells, target_mineral
             )
+            if halo_cells:
+                # CRITICAL. _build_spatial_context puts everything it was given
+                # into spatial_context["grid_cells"], and BaseAgent.run() reads
+                # its work list from exactly that key — so leaving the halo in it
+                # would have every agent score the halo as if it were core, which
+                # is the one thing this whole design exists to prevent. Put the
+                # core back, and hand the halo over under its own key.
+                spatial_context["grid_cells"] = [c.model_dump() for c in grid_cells]
+                spatial_context["context_cells"] = [c.model_dump() for c in halo_cells]
+
+                # Coverage must describe the cells that were SCORED, not the
+                # cells that were looked up. Counting the halo here would report
+                # a 100-cell tile as 144 and quietly inflate every coverage ratio
+                # in the run record by ~44%.
+                core_ids = {c.cell_id for c in grid_cells}
+                facts = spatial_context.get("cell_facts") or {}
+                core_facts = {k: v for k, v in facts.items() if k in core_ids}
+                cov = spatial_context.setdefault("coverage", {})
+                cov["cells_total"] = len(core_facts)
+                cov["cells_with_geology"] = sum(1 for f in core_facts.values() if f.get("geology"))
+                cov["cells_with_structures"] = sum(1 for f in core_facts.values() if f.get("structures"))
+                cov["cells_with_wofe"] = sum(1 for f in core_facts.values() if f.get("wofe"))
+                cov["cells_with_occurrences"] = sum(
+                    1 for f in core_facts.values() if (f.get("occurrences") or {}).get("nearest")
+                )
+                cov["context_cells"] = len(halo_cells)
             spatial_ctx_ref = spatial_context
 
             # Report what the agents will actually see. A run where every count
@@ -259,7 +326,21 @@ class OrchestratorAgent:
 
             # 4c. AOI-relative normalization — shading answers "best spots in
             # THIS area", not "score vs the rest of the world"
-            scored_cells = normalize_relative(scored_cells)
+            #
+            # A sweep tile is normalized here too, deliberately, even though the
+            # sweep manager will re-normalize the whole region afterwards and
+            # overwrite these values with scope="region".
+            #
+            # The alternative — emitting tiles with relative_score/percentile/tier
+            # left null, as §39 proposes — is worse than it looks. Three
+            # downstream consumers assume those fields are populated and every
+            # one of them fails silently rather than loudly: the map's shading
+            # expression coalesces relative_score to the absolute score, so a
+            # null renders as a plausible map that is answering a different
+            # question; and an existing integration test asserts every cell has a
+            # real tier. Normalizing twice is cheap, and it means no cell ever
+            # exists in a state where its scope is unknown.
+            scored_cells = normalize_relative(scored_cells, scope="aoi")
 
             # 4d. Novelty — is a high score finding something, or re-finding it?
             self._attach_novelty(scored_cells, spatial_context)

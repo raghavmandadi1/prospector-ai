@@ -147,6 +147,9 @@ class HistoricalAgent(BaseAgent):
         historic_mines = spatial_context.get("historic_mines", [])
         grid_cells = spatial_context.get("grid_cells", [])
         cell_facts = spatial_context.get("cell_facts", {})
+        # Halo cells of a sweep tile, if this is one. Empty for a
+        # hand-drawn AOI, which keeps that prompt byte-identical.
+        context_cells = spatial_context.get("context_cells") or []
 
         per_cell = cell_facts_block(
             grid_cells,
@@ -164,6 +167,7 @@ class HistoricalAgent(BaseAgent):
                 "more than a cell width. Distances are from the cell polygon, so "
                 "0 km means inside the cell."
             ),
+            context_cells=context_cells,
         )
 
         if historic_mines:
