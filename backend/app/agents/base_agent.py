@@ -93,6 +93,22 @@ def batch_label(index: int) -> str:
     return f"c{index + 1}"
 
 
+def neighbour_label(index: int) -> str:
+    """Label for a halo cell — a separate namespace from ``batch_label``.
+
+    Halo cells exist so a cell on a tile edge is reasoned about with its whole
+    geological neighbourhood rather than the half that happened to fall inside
+    the tile. They are context, never output.
+
+    The separate ``n`` namespace is what makes that structural rather than a
+    filter someone can forget: ``parse_llm_response`` builds its label map from
+    the batch only, so an ``n3`` echoed back by the model matches nothing and is
+    dropped. There is no code path in which a halo cell becomes a ScoredCell,
+    reaches the cache, or lands in a run record.
+    """
+    return f"n{index + 1}"
+
+
 def cell_summary(cells: List[Dict]) -> str:
     """Compact, human-readable cell list with center coordinates.
 
@@ -116,6 +132,7 @@ def cell_facts_block(
     render: Callable[[Dict[str, Any]], Optional[str]],
     header: str,
     empty_note: str = "",
+    context_cells: Optional[List[Dict]] = None,
 ) -> str:
     """One line of domain evidence per cell, keyed to the batch labels.
 
@@ -135,6 +152,13 @@ def cell_facts_block(
     Returns "" when no cell in the batch has any facts, so an agent running
     without its data source keeps its original prompt shape instead of gaining an
     empty section.
+
+    ``context_cells`` are halo cells from a regional sweep tile (see
+    ``app.sweeps.tiles``). They are rendered in a clearly separated subsection
+    under the ``n1..nM`` label namespace and explicitly marked as not-to-score.
+    An empty or absent ``context_cells`` produces byte-identical output to
+    before, so a single-AOI run's prompt — and therefore its cache keys — is
+    unchanged.
     """
     if not cell_facts:
         return ""
@@ -150,6 +174,14 @@ def cell_facts_block(
         else:
             lines.append(f"  - {batch_label(i)}: no data")
 
+    ctx_lines: List[str] = []
+    for i, c in enumerate(context_cells or []):
+        facts = cell_facts.get(c.get("cell_id", "")) or {}
+        rendered = render(facts) if facts else None
+        if rendered:
+            any_data = True
+            ctx_lines.append(f"  - {neighbour_label(i)}: {rendered}")
+
     if not any_data:
         return ""
 
@@ -157,6 +189,15 @@ def cell_facts_block(
     if empty_note:
         parts.append(empty_note)
     parts.append("\n".join(lines))
+    if ctx_lines:
+        parts.append(
+            "\nNeighbouring ground, for context only — DO NOT score these and do "
+            "not include them in your response. They sit just outside this batch "
+            "and are listed so you can judge the cells above in their real "
+            "geological setting rather than as if the batch boundary were a "
+            "geological one:"
+        )
+        parts.append("\n".join(ctx_lines))
     return "\n".join(parts)
 
 
@@ -489,6 +530,21 @@ class BaseAgent(ABC):
                     "cell_facts",
                     "cell_novelty",
                     "roles_active",
+                    # Halo cells of a sweep tile. Excluded deliberately, and the
+                    # reasoning is not the same as for the keys above.
+                    #
+                    # This filter sweeps in ANY list-valued spatial_context key,
+                    # so leaving context_cells out of it would fold a tile's halo
+                    # into the cache key of every cell in that tile. The halo
+                    # differs per tile, so the same cell scored in a sweep and in
+                    # a hand-drawn AOI would key differently and never share a
+                    # hit — quietly destroying the cache reuse that makes the
+                    # sweep-improve-re-sweep workflow (§41.2) affordable.
+                    #
+                    # It is sound to exclude: the halo adds surrounding context
+                    # to the prompt but the cell's own evidence, which is what
+                    # actually determines its score, is in `cell` above.
+                    "context_cells",
                 )
                 and isinstance(v, (list, str))
             },

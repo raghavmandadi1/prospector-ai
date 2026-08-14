@@ -22,8 +22,18 @@ class ScoredCell(BaseModel):
     relative_score: Optional[float] = None
     # Percentile rank of this cell's composite score within the AOI (0–1)
     percentile: Optional[float] = None
-    # Tier assigned from AOI-relative percentile (high/medium/low/negligible)
+    # Tier assigned from percentile within `normalization_scope`
+    # (high/medium/low/negligible)
     tier: Optional[str] = None
+    # Which population the three fields above were computed against: "aoi" for a
+    # hand-drawn polygon, "region" for a whole regional sweep.
+    #
+    # This is not decoration. The same cell can be tier "high" in a barren AOI
+    # and "low" in the corridor that contains it, and both are correct — they
+    # answer different questions. Without the scope recorded on the cell, a
+    # ranked list merged from several runs reads as one ranking when it is
+    # several, and the legend cannot say which claim it is making.
+    normalization_scope: Optional[str] = None
     # When this cell was interpolated from a coarser analysis grid, the id of
     # the nearest coarse cell (used to look up per-agent evidence in the UI)
     parent_cell_id: Optional[str] = None

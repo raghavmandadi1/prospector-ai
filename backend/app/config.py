@@ -20,6 +20,13 @@ REFERENCE_DIR = DATA_DIR / "reference"
 DERIVED_DIR = DATA_DIR / "derived"
 #: Imported field pins (scripts/import_field_pins.py). Gitignored.
 USER_SITES_DIR = DATA_DIR / "user_sites"
+#: Regional sweep manifests, one JSON per sweep. Gitignored.
+#:
+#: Separate from RUNS_DIR deliberately: each tile of a sweep still writes its own
+#: run record there, and a manifest is the index over them plus the resume state.
+#: Keeping them apart means `list_runs()` does not start returning sweep
+#: manifests it cannot parse.
+SWEEPS_DIR = DATA_DIR / "sweeps"
 
 
 class Settings(BaseSettings):

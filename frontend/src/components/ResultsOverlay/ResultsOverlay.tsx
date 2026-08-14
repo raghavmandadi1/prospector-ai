@@ -1,6 +1,6 @@
 import { useAppStore } from '../../store'
-import { NOVELTY, NOVELTY_ORDER } from '../../types'
-import type { NoveltyClass } from '../../types'
+import { NORMALIZATION_SCOPE_LABEL, NOVELTY, NOVELTY_ORDER } from '../../types'
+import type { NormalizationScope, NoveltyClass } from '../../types'
 
 export default function ResultsOverlay() {
   const { analysisResults, currentJob, targetMineral, shadingMode, setShadingMode } = useAppStore()
@@ -11,6 +11,14 @@ export default function ResultsOverlay() {
   const medCount = analysisResults.filter((c) => c.tier === 'medium').length
   const interpolated = analysisResults.some((c) => c.parent_cell_id)
   const mineral = (currentJob?.target_mineral ?? targetMineral)?.toUpperCase()
+
+  // What population the relative shading is relative TO. "Top 10%" is a
+  // different claim for a drawn polygon than for a whole corridor sweep, and a
+  // legend that does not say which is quietly asserting the wrong one. Absent
+  // on runs predating the field, which were all AOI-scoped.
+  const scope: NormalizationScope =
+    analysisResults.find((c) => c.normalization_scope)?.normalization_scope ?? 'aoi'
+  const scopeLabel = NORMALIZATION_SCOPE_LABEL[scope]
 
   // Novelty is optional: absent on older runs and wherever the occurrence
   // extract was never built. If no cell carries it, the whole block stays off
@@ -58,7 +66,7 @@ export default function ResultsOverlay() {
                   ? 'bg-gray-200 text-gray-900 font-medium'
                   : 'bg-gray-800 text-gray-400 hover:text-white'
               }`}
-              title="Shade cells relative to the other cells in this AOI"
+              title={`Shade cells relative to the other cells in ${scopeLabel}`}
             >
               Relative
             </button>
@@ -87,8 +95,8 @@ export default function ResultsOverlay() {
         <div className="flex justify-between text-[10px] text-gray-400 mb-2">
           {shadingMode === 'relative' ? (
             <>
-              <span>worst in AOI</span>
-              <span>best in AOI</span>
+              <span>worst in {scopeLabel}</span>
+              <span>best in {scopeLabel}</span>
             </>
           ) : (
             <>
@@ -100,8 +108,10 @@ export default function ResultsOverlay() {
 
         {shadingMode === 'relative' && (
           <p className="text-[10px] text-gray-500 leading-snug">
-            Ranking within this polygon only — a "best" cell here may still be
-            weak in absolute terms. Click a cell to see its absolute score.
+            {scope === 'region'
+              ? 'Ranking across the whole swept region — "high" means top decile of the sweep, not of any one tile.'
+              : 'Ranking within this polygon only — a "best" cell here may still be weak in absolute terms.'}{' '}
+            Click a cell to see its absolute score.
           </p>
         )}
         {interpolated && (

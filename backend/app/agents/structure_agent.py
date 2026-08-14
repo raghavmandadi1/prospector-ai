@@ -157,6 +157,9 @@ class StructureAgent(BaseAgent):
         fault_traces = spatial_context.get("fault_traces", [])
         grid_cells = spatial_context.get("grid_cells", [])
         cell_facts = spatial_context.get("cell_facts", {})
+        # Halo cells of a sweep tile, if this is one. Empty for a
+        # hand-drawn AOI, which keeps that prompt byte-identical.
+        context_cells = spatial_context.get("context_cells") or []
 
         per_cell = cell_facts_block(
             grid_cells,
@@ -174,6 +177,7 @@ class StructureAgent(BaseAgent):
                 "was mapped, not how deformed it is — do not reward a cell for "
                 "sitting in a well-mapped quad."
             ),
+            context_cells=context_cells,
         )
 
         if fault_traces:

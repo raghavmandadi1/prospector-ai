@@ -80,6 +80,9 @@ class LithologyAgent(BaseAgent):
         geology_units = spatial_context.get("geology_units", [])
         grid_cells = spatial_context.get("grid_cells", [])
         cell_facts = spatial_context.get("cell_facts", {})
+        # Halo cells of a sweep tile, if this is one. Empty for a
+        # hand-drawn AOI, which keeps that prompt byte-identical.
+        context_cells = spatial_context.get("context_cells") or []
 
         per_cell = cell_facts_block(
             grid_cells,
@@ -98,6 +101,7 @@ class LithologyAgent(BaseAgent):
                 "anchor your score where present. \"no data\" means no mapped "
                 "polygon was found for that cell, not barren ground."
             ),
+            context_cells=context_cells,
         )
 
         if geology_units:

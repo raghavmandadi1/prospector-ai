@@ -87,17 +87,37 @@ def synthesize(
     return final_cells
 
 
-def normalize_relative(cells: List[ScoredCell]) -> List[ScoredCell]:
+def normalize_relative(
+    cells: List[ScoredCell], scope: str = "aoi"
+) -> List[ScoredCell]:
     """
-    Annotate cells with AOI-relative fields (in place, returns same list):
+    Annotate cells with relative fields (in place, returns same list):
 
-    - relative_score: min-max stretch of the composite within this AOI.
+    - relative_score: min-max stretch of the composite across ``cells``.
       Even when every composite sits in the "negligible" absolute band, the
       stretch spreads them across 0–1 so shading shows the best spots.
     - percentile: fraction of cells with a strictly lower composite
       (ties get the midpoint of their tied block).
     - tier: assigned from percentile, not from absolute thresholds.
+    - normalization_scope: which population the three above were computed over.
+
+    ``scope`` does not change the arithmetic — it records what the arithmetic
+    was done over, and that is the whole point of the parameter.
+
+    A regional sweep must call this ONCE over every cell in the region, after
+    all tiles finish, rather than once per tile. Normalizing per tile makes the
+    best cell of a barren tile "high" and a mediocre cell of a rich tile
+    "medium" — both correct per tile, both wrong regionally — and stitches into
+    a map with visible checkerboard artifacts that follow the tile grid rather
+    than the geology. If you see that checkerboard, this is why.
+
+    The absolute ``score`` is untouched either way, which is what makes cells
+    from different runs comparable at all. Anything that merges across runs (the
+    cached-coverage layer, a catchment rollup) must use ``score`` and never these
+    fields, because there is no common denominator across independent runs.
     """
+    if scope not in ("aoi", "region"):
+        raise ValueError(f"scope must be 'aoi' or 'region', got {scope!r}")
     if not cells:
         return cells
 
@@ -120,10 +140,11 @@ def normalize_relative(cells: List[ScoredCell]) -> List[ScoredCell]:
         hi = bisect.bisect_right(sorted_scores, c.score)
         c.percentile = round(((lo + hi) / 2) / n, 4)
         c.tier = _tier_from_percentile(c.percentile) if spread > 1e-9 else "low"
+        c.normalization_scope = scope
 
     logger.info(
-        f"Relative normalization: composite range [{smin:.3f}, {smax:.3f}] "
-        f"across {n} cells"
+        f"Relative normalization ({scope}): composite range "
+        f"[{smin:.3f}, {smax:.3f}] across {n} cells"
     )
     return cells
 

@@ -51,9 +51,14 @@ else:
 # disk (SQLite / static GeoJSON), not Postgres, so they work either way.
 from app.api import analysis_dev as _cache_routes  # noqa: E402
 from app.api import reference  # noqa: E402
+from app.api import sweeps  # noqa: E402
 
 app.include_router(_cache_routes.cache_router, prefix="/api/v1")
 app.include_router(reference.router, prefix="/api/v1")
+# Sweeps are mode-independent for the same reason: manifests and merged cells
+# are files under data/sweeps/, and each tile runs through the same in-process
+# orchestrator either way.
+app.include_router(sweeps.router, prefix="/api/v1")
 
 
 @app.get("/health")
